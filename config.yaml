@@ -1,0 +1,18 @@
+mqtt:
+  broker: "[MQTT_SERVER_IP_ADDRESS]" # Replace with your MQTT broker IP (e.g., Home Assistant)
+  port: 1883
+  username: "[MQTT_USERNAME]"
+  password: "[MQTT_PASSWORD]"
+  topic: "smartframe/set_mode"
+  state_topic: "smartframe/mode_state"
+
+default_mode: "mirror" # Possible values: "audio", "mirror", or "off"
+
+magic_mirror:
+  url: "http://[MAGIC_MIRROR_SERVER_IP_ADDRESS]:[PORT]" # Replace with your MagicMirror server URL
+
+audio:
+  microphone: "I2S" # Configured via OS (ALSA)
+  device_index: null # Change to an integer if you need to select a specific microphone index
+  threshold_db_warning: 60 # Volume in dB to trigger yellow/orange text color
+  threshold_db_error: 85 # Volume in dB to trigger red text color

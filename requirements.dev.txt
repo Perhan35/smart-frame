@@ -1,0 +1,7 @@
+# Dev requirements for macOS (Python 3.13)
+# pygame 2.5.2 has no Python 3.13 wheel; 2.6.x does.
+paho-mqtt==1.6.1
+PyYAML==6.0.1
+pygame==2.6.1
+numpy==1.26.4
+pyaudio>=0.2.14
