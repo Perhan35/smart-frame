@@ -6,10 +6,14 @@ mqtt:
   topic: "smartframe/set_mode"
   state_topic: "smartframe/mode_state"
 
-default_mode: "mirror" # Possible values: "audio", "mirror", or "off"
+default_mode: "off" # Possible values: "audio", "mirror", or "off"
+
+service:
+  working_directory: "/home/pi/smart-frame" # Absolute path to the SmartFrame project directory
+  user: "pi" # Linux user that runs the service
 
 magic_mirror:
-  url: "http://[MAGIC_MIRROR_SERVER_IP_ADDRESS]:[PORT]" # Replace with your MagicMirror server URL
+  url: "http(s)://[MAGIC_MIRROR_SERVER_IP_ADDRESS]:[PORT]" # Replace with your MagicMirror server URL
 
 audio:
   microphone: "I2S" # Configured via OS (ALSA)

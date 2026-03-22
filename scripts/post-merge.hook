@@ -1,0 +1,19 @@
+#!/bin/sh
+# Runs after every `git pull` / `git merge` to sync new config keys.
+
+REPO_ROOT="$(git rev-parse --show-toplevel)"
+
+# Pick the right Python: prefer the project venv, fall back to system python3.
+if [ -f "$REPO_ROOT/.venv/bin/python3" ]; then
+    PYTHON="$REPO_ROOT/.venv/bin/python3"
+else
+    PYTHON="python3"
+fi
+
+# Only run if config.example.yaml was modified by the merge.
+if git diff-tree -r --name-only --no-commit-id ORIG_HEAD HEAD 2>/dev/null | grep -q "config.example.yaml"; then
+    echo "[post-merge] config.example.yaml changed — updating config.yaml..."
+    "$PYTHON" "$REPO_ROOT/scripts/update_config.py"
+else
+    echo "[post-merge] config.example.yaml unchanged, skipping config update."
+fi

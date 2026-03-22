@@ -5,12 +5,12 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-User=pi
-WorkingDirectory=/home/pi/smart-frame
+User={{USER}}
+WorkingDirectory={{WORKING_DIRECTORY}}
 # Graphical interfaces often require targeting DISPLAY=:0 (X11)
 Environment=DISPLAY=:0
-Environment=XAUTHORITY=/home/pi/.Xauthority
-ExecStart=/usr/bin/python3 main.py
+Environment=XAUTHORITY=/home/{{USER}}/.Xauthority
+ExecStart={{WORKING_DIRECTORY}}/.venv/bin/python3 main.py
 Restart=on-failure
 RestartSec=10
 

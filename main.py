@@ -1,5 +1,6 @@
 import os
 import subprocess
+import sys
 import time
 import yaml
 import paho.mqtt.client as mqtt
@@ -9,6 +10,9 @@ logging.basicConfig(level=logging.INFO)
 
 # Load configuration
 config_path = os.path.join(os.path.dirname(__file__), 'config.yaml')
+if not os.path.exists(config_path):
+    logging.error("config.yaml not found. Copy config.example.yaml to config.yaml and fill in your settings.")
+    sys.exit(1)
 with open(config_path, 'r') as file:
     config = yaml.safe_load(file)
 
@@ -60,7 +64,7 @@ def start_mode(mode):
         set_display_power(True)
         logging.info("Starting Audio Mode...")
         script_path = os.path.join(modes_dir, 'audio_mode.py')
-        current_process = subprocess.Popen(['python3', script_path])
+        current_process = subprocess.Popen([sys.executable, script_path])
     elif mode == 'mirror':
         set_display_power(True)
         logging.info("Starting Magic Mirror Mode...")
