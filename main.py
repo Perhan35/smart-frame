@@ -95,6 +95,9 @@ def on_connect(client, userdata, _connect_flags, reason_code, _properties):
             client.publish(MQTT_STATE_TOPIC, current_mode, retain=True)
     else:
         logging.error(f"Failed to connect, reason code: {reason_code}")
+        if reason_code in ["Not authorized", "Bad user name or password"]:
+            logging.error("MQTT authentication failed. Check your config.yaml.")
+            client.disconnect()
 
 def on_message(client, userdata, msg):
     payload = msg.payload.decode('utf-8').strip().lower()
@@ -132,10 +135,12 @@ if __name__ == '__main__':
     try:
         if MQTT_BROKER != "[MQTT_SERVER_IP_ADDRESS]":
             mqtt_client.loop_forever()
-        else:
-            # Keeps the main thread alive in offline mode
-            while True:
-                time.sleep(1)
+            logging.warning("MQTT loop exited. Falling back to offline mode.")
+            
+        # Keeps the main thread alive in offline mode or if loop_forever exits
+        while True:
+            time.sleep(1)
     except KeyboardInterrupt:
         logging.info("Shutting down...")
+    finally:
         stop_current_mode()

@@ -25,6 +25,13 @@ cd smart-frame
 ./scripts/setup_pi.sh
 ```
 
+On some systems (Raspberry Pi Zero 2) the RAM is too low for pip to install the dependencies. In that case, you create a temporary directory:
+
+```bash
+mkdir -p ~/pip_tmp
+TMPDIR=~/pip_tmp ./scripts/setup_pi.sh
+```
+
 The setup script installs all OS-level dependencies (`portaudio`, SDL2, Chromium, etc.), creates a Python virtual environment (`.venv/`), and installs the Python packages inside it.
 
 ## Configuration
@@ -35,9 +42,6 @@ The setup script creates `config.yaml` from `config.example.yaml` automatically.
   - `device_index`: Specific ALSA microphone index ID (if required).
   - `threshold_db_warning`: Volume (in dB) where the dB text will turn yellow/orange (default: 60).
   - `threshold_db_error`: Volume (in dB) where the dB text will turn red (default: 85).
-- **Service**:
-  - `working_directory`: Absolute path to the SmartFrame project directory (default: `/home/pi/smart-frame`).
-  - `user`: Linux user that runs the systemd service (default: `pi`).
 
 > **Note:** The setup script will warn you if `config.yaml` still has placeholder values and skip the service installation prompt until you configure it.
 
@@ -67,14 +71,14 @@ source .venv/bin/activate
 python3 main.py
 ```
 
-### Service Installation (Start on Boot)
-Make sure the `service.working_directory` and `service.user` values in `config.yaml` match your setup, then run the install script:
+### Service Installation / Update (Start on Boot)
+To install or update the service, run the install script:
 
 ```bash
 ./scripts/install_service.sh
 ```
 
-This reads `config.yaml`, generates the systemd service file from the template (`scripts/smartframe.service`), and installs/starts it.
+This generates the systemd service file from the template (`scripts/smartframe.service`), and installs/starts it.
 
 ## Home Assistant Integration
 Your Home Assistant instance can switch between the modes (or turn off the screen) via MQTT. The orchestrator listens for commands on the `smartframe/set_mode` topic and publishes its current mode to the `smartframe/mode_state` topic.

@@ -7,20 +7,9 @@ echo "=== SmartFrame Service Installer ==="
 DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )"
 cd "$DIR/.."
 
-# Read values from config.yaml using the venv Python (PyYAML is already installed)
-WORKING_DIR=$(.venv/bin/python3 -c "
-import yaml
-with open('config.yaml') as f:
-    c = yaml.safe_load(f)
-print(c.get('service', {}).get('working_directory', '/home/pi/smart-frame'))
-")
-
-SERVICE_USER=$(.venv/bin/python3 -c "
-import yaml
-with open('config.yaml') as f:
-    c = yaml.safe_load(f)
-print(c.get('service', {}).get('user', 'pi'))
-")
+# Automatically determine working directory and service user
+WORKING_DIR="$(pwd)"
+SERVICE_USER="$USER"
 
 echo "Working directory: $WORKING_DIR"
 echo "Service user:      $SERVICE_USER"
@@ -37,7 +26,14 @@ cat /tmp/smartframe.service
 echo "---"
 echo ""
 
-# Install the service
+# Check if service already exists
+ACTION="installed"
+if [ -f "/etc/systemd/system/smartframe.service" ]; then
+    echo "Existing service found. Updating..."
+    ACTION="updated"
+fi
+
+# Install or update the service
 sudo cp /tmp/smartframe.service /etc/systemd/system/smartframe.service
 rm /tmp/smartframe.service
 
@@ -45,5 +41,5 @@ sudo systemctl daemon-reload
 sudo systemctl enable smartframe.service
 sudo systemctl restart smartframe.service
 
-echo "=== Service installed and started ==="
+echo "=== Service ${ACTION} and started ==="
 echo "Check status with: sudo systemctl status smartframe.service"
