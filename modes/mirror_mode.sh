@@ -19,11 +19,22 @@ fi
 
 echo "Connecting to MagicMirror on: $MIRROR_URL"
 
-if [ -n "$DISPLAY" ]; then
+# Support running from SSH or systemd by auto-detecting display environment
+if [ -z "$DISPLAY" ] && [ -z "$WAYLAND_DISPLAY" ]; then
+    if [ -n "$(pgrep -x labwc)" ] || [ -n "$(pgrep -x wayfire)" ]; then
+        # Default to wayland-1 which is common on Pi OS Bookworm
+        export WAYLAND_DISPLAY="wayland-1"
+        export XDG_RUNTIME_DIR="/run/user/$(id -u)"
+    else
+        export DISPLAY=":0"
+    fi
+fi
+
+if [ -n "$DISPLAY" ] && [ -z "$WAYLAND_DISPLAY" ]; then
     # Disable the screen saver (X11)
-    xset s noblank
-    xset s off
-    xset -dpms
+    xset s noblank 2>/dev/null || true
+    xset s off 2>/dev/null || true
+    xset -dpms 2>/dev/null || true
 fi
 
 # Launch the task in the background and get the PID
@@ -42,7 +53,8 @@ $CHROMIUM_CMD \
   --disable-infobars \
   --kiosk \
   --check-for-update-interval=31536000 \
-  "$MIRROR_URL" &
+  --disable-dev-shm-usage \
+  "$MIRROR_URL" > /dev/null 2>&1 &
 
 CHROMIUM_PID=$!
 

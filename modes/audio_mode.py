@@ -23,7 +23,6 @@ THRESHOLD_ERROR = audio_config.get('threshold_db_error', 85)
 CHUNK = 1024
 FORMAT = pyaudio.paInt16
 CHANNELS = 1
-RATE = 44100
 
 print("Initializing Audio Mode...")
 pygame.init()
@@ -71,12 +70,20 @@ try:
     stream_params = {
         'format': FORMAT,
         'channels': CHANNELS,
-        'rate': RATE,
         'input': True,
         'frames_per_buffer': CHUNK
     }
     if DEVICE_INDEX is not None and isinstance(DEVICE_INDEX, int):
         stream_params['input_device_index'] = DEVICE_INDEX
+        device_info = p.get_device_info_by_index(DEVICE_INDEX)
+    else:
+        try:
+            device_info = p.get_default_input_device_info()
+        except IOError:
+            # Fallback if no default input is found
+            device_info = {'defaultSampleRate': 48000}
+            
+    stream_params['rate'] = int(device_info['defaultSampleRate'])
         
     stream = p.open(**stream_params)
 except Exception as e:

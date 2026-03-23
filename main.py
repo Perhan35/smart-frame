@@ -2,6 +2,7 @@ import os
 import subprocess
 import sys
 import time
+import json
 import yaml
 import paho.mqtt.client as mqtt
 import logging
@@ -21,6 +22,9 @@ MQTT_BROKER = mqtt_config.get('broker', '[MQTT_SERVER_IP_ADDRESS]')
 MQTT_PORT = mqtt_config.get('port', 1883)
 MQTT_COMMAND_TOPIC = mqtt_config.get('topic', 'smartframe/set_mode')
 MQTT_STATE_TOPIC = mqtt_config.get('state_topic', 'smartframe/mode_state')
+MQTT_STATUS_TOPIC = mqtt_config.get('status_topic', 'smartframe/status')
+MQTT_AVAILABLE_MODES_TOPIC = mqtt_config.get('available_modes_topic', 'smartframe/modes_available')
+MQTT_DISCOVERY_PREFIX = mqtt_config.get('discovery_prefix', 'homeassistant')
 MQTT_USER = mqtt_config.get('username')
 MQTT_PASS = mqtt_config.get('password')
 
@@ -47,6 +51,17 @@ def stop_current_mode():
             current_process.kill()
         current_process = None
 
+def get_available_modes():
+    modes = ['off']
+    modes_dir = os.path.join(os.path.dirname(__file__), 'modes')
+    if os.path.isdir(modes_dir):
+        for f in os.path.listdir(modes_dir):
+            if f.endswith('_mode.py') or f.endswith('_mode.sh'):
+                mode_name = f.replace('_mode.py', '').replace('_mode.sh', '')
+                if mode_name not in modes:
+                    modes.append(mode_name)
+    return sorted(modes)
+
 def start_mode(mode):
     global current_process
     global current_mode
@@ -60,23 +75,26 @@ def start_mode(mode):
     
     modes_dir = os.path.join(os.path.dirname(__file__), 'modes')
     
-    if mode == 'audio':
-        set_display_power(True)
-        logging.info("Starting Audio Mode...")
-        script_path = os.path.join(modes_dir, 'audio_mode.py')
-        current_process = subprocess.Popen([sys.executable, script_path])
-    elif mode == 'mirror':
-        set_display_power(True)
-        logging.info("Starting Magic Mirror Mode...")
-        script_path = os.path.join(modes_dir, 'mirror_mode.sh')
-        current_process = subprocess.Popen(['bash', script_path])
-    elif mode == 'off':
+    if mode == 'off':
         logging.info("Switching off screen...")
         set_display_power(False)
     else:
-        logging.warning(f"Unknown mode: {mode}. Send 'audio', 'mirror', or 'off'.")
-        current_mode = None
-        return
+        py_script = os.path.join(modes_dir, f'{mode}_mode.py')
+        sh_script = os.path.join(modes_dir, f'{mode}_mode.sh')
+        
+        if os.path.exists(py_script):
+            set_display_power(True)
+            logging.info(f"Starting {mode.capitalize()} Mode (Python)...")
+            current_process = subprocess.Popen([sys.executable, py_script])
+        elif os.path.exists(sh_script):
+            set_display_power(True)
+            logging.info(f"Starting {mode.capitalize()} Mode (Bash)...")
+            current_process = subprocess.Popen(['bash', sh_script])
+        else:
+            available = get_available_modes()
+            logging.warning(f"Unknown mode: {mode}. Available modes: {available}")
+            current_mode = None
+            return
 
     # Publish state update
     if mqtt_client and current_mode:
@@ -84,12 +102,47 @@ def start_mode(mode):
         logging.info(f"Published state: {current_mode} to {MQTT_STATE_TOPIC}")
 
 # MQTT Callbacks
+def publish_discovery_and_status(client):
+    modes = get_available_modes()
+    
+    # 1. Publish status (online)
+    client.publish(MQTT_STATUS_TOPIC, "online", retain=True)
+    
+    # 2. Publish list of available modes
+    client.publish(MQTT_AVAILABLE_MODES_TOPIC, json.dumps(modes), retain=True)
+
+    # 3. Publish Home Assistant Discovery payload
+    discovery_topic = f"{MQTT_DISCOVERY_PREFIX}/select/smartframe/mode/config"
+    discovery_payload = {
+        "name": "SmartFrame Mode",
+        "unique_id": "smartframe_mode_selector",
+        "command_topic": MQTT_COMMAND_TOPIC,
+        "state_topic": MQTT_STATE_TOPIC,
+        "options": modes,
+        "availability": [
+            {
+                "topic": MQTT_STATUS_TOPIC
+            }
+        ],
+        "device": {
+            "identifiers": ["smartframe_orchestrator"],
+            "name": "Smart Frame",
+            "manufacturer": "Custom",
+            "model": "Smart Frame V1"
+        }
+    }
+    client.publish(discovery_topic, json.dumps(discovery_payload), retain=True)
+    logging.info("Published Home Assistant MQTT discovery payload and online status.")
+
 def on_connect(client, userdata, _connect_flags, reason_code, _properties):
     global current_mode
     if not reason_code.is_failure:
         logging.info("Connected to MQTT broker.")
         client.subscribe(MQTT_COMMAND_TOPIC)
         logging.info(f"Subscribed to command topic: {MQTT_COMMAND_TOPIC}")
+        
+        publish_discovery_and_status(client)
+        
         # Publish current state on connect
         if current_mode:
             client.publish(MQTT_STATE_TOPIC, current_mode, retain=True)
@@ -102,16 +155,19 @@ def on_connect(client, userdata, _connect_flags, reason_code, _properties):
 def on_message(client, userdata, msg):
     payload = msg.payload.decode('utf-8').strip().lower()
     logging.info(f"Message received on {msg.topic}: {payload}")
-    if payload in ['audio', 'mirror', 'off']:
+    available_modes = get_available_modes()
+    if payload in available_modes:
         start_mode(payload)
     else:
-        logging.warning("Invalid payload. Please send 'audio', 'mirror', or 'off'.")
+        logging.warning(f"Invalid payload '{payload}'. Available modes: {available_modes}")
 
 if __name__ == '__main__':
     mqtt_client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
     if MQTT_USER and MQTT_USER != "[MQTT_USERNAME]":
         mqtt_client.username_pw_set(MQTT_USER, MQTT_PASS)
 
+    mqtt_client.will_set(MQTT_STATUS_TOPIC, "offline", retain=True)
+    
     mqtt_client.on_connect = on_connect
     mqtt_client.on_message = on_message
 

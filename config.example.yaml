@@ -5,6 +5,9 @@ mqtt:
   password: "[MQTT_PASSWORD]"
   topic: "smartframe/set_mode"
   state_topic: "smartframe/mode_state"
+  status_topic: "smartframe/status"
+  available_modes_topic: "smartframe/modes_available"
+  discovery_prefix: "homeassistant"
 
 default_mode: "off" # Possible values: "audio", "mirror", or "off"
 

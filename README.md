@@ -81,28 +81,14 @@ To install or update the service, run the install script:
 This generates the systemd service file from the template (`scripts/smartframe.service`), and installs/starts it.
 
 ## Home Assistant Integration
-Your Home Assistant instance can switch between the modes (or turn off the screen) via MQTT. The orchestrator listens for commands on the `smartframe/set_mode` topic and publishes its current mode to the `smartframe/mode_state` topic.
 
-Supported payloads:
-- `audio`
-- `mirror`
-- `off` (Turns off the LCD screen via `vcgencmd`)
+SmartFrame natively supports **Home Assistant MQTT Auto-Discovery**. When connected to your MQTT broker, it automatically creates a `select` entity (`select.smartframe_mode`) in Home Assistant, populated with the currently available modes. 
 
-### Home Assistant `configuration.yaml` Example
-The best way to integrate this is by creating an MQTT Select entity. Add this to your Home Assistant `configuration.yaml`:
+Modes are automatically detected from the `modes/` directory (e.g., `audio`, `mirror`), along with the built-in `off` mode. You do *not* need to manually configure YAML in Home Assistant.
 
-```yaml
-mqtt:
-  select:
-    - name: "SmartFrame Mode"
-      unique_id: "smartframe_mode_select"
-      command_topic: "smartframe/set_mode"
-      state_topic: "smartframe/mode_state"
-      options:
-        - "audio"
-        - "mirror"
-        - "off"
-      icon: mdi:monitor-dashboard
-```
-
-Once added and Home Assistant is restarted, you will have a dropdown entity (`select.smartframe_mode`) to effortlessly switch between modes or turn the screen off!
+### Advanced MQTT Topics
+If you prefer manual configuration or integrating with other systems, the orchestrator uses the following topics (configurable in `config.yaml`):
+- `smartframe/set_mode` (Command topic to change active mode)
+- `smartframe/mode_state` (State topic showing current active mode)
+- `smartframe/status` (LWT availability topic: `online` or `offline`)
+- `smartframe/modes_available` (JSON list of dynamically detected available modes)
