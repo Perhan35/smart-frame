@@ -44,6 +44,10 @@ else
 fi
 
 echo ""
+echo "== Configuring Audio Input Device =="
+python3 scripts/list_audio_devices.py || echo "Warning: Audio device selection failed."
+
+echo ""
 echo "=== Setup complete ==="
 
 # Check if config.yaml still contains placeholder values

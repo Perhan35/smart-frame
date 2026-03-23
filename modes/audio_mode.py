@@ -4,6 +4,7 @@ import pyaudio
 import sys
 import os
 import yaml
+import ctypes
 
 # Load configuration
 config_path = os.path.join(os.path.dirname(__file__), '..', 'config.yaml')
@@ -32,11 +33,36 @@ try:
     screen = pygame.display.set_mode((1920, 1080), pygame.FULLSCREEN)
 except pygame.error:
     # Fallback for local testing (if running outside of the Pi)
-    screen = pygame.display.set_mode((800, 600))
+    try:
+        screen = pygame.display.set_mode((800, 600))
+    except pygame.error:
+        # Headless mode fallback
+        os.environ["SDL_VIDEODRIVER"] = "dummy"
+        pygame.display.init()
+        screen = pygame.display.set_mode((1, 1))
 pygame.display.set_caption("SmartFrame - Audio Spectrum Analyzer")
 
 # Hide the mouse cursor
-pygame.mouse.set_visible(False)
+try:
+    pygame.mouse.set_visible(False)
+except pygame.error:
+    pass
+
+# ALSA error suppression
+ERROR_HANDLER_FUNC = ctypes.CFUNCTYPE(None, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p)
+def py_error_handler(filename, line, function, err, fmt):
+    pass
+c_error_handler = ERROR_HANDLER_FUNC(py_error_handler)
+
+try:
+    asound = ctypes.cdll.LoadLibrary('libasound.so.2')
+    asound.snd_lib_error_set_handler(c_error_handler)
+except OSError:
+    try:
+        asound = ctypes.cdll.LoadLibrary('libasound.so')
+        asound.snd_lib_error_set_handler(c_error_handler)
+    except OSError:
+        pass
 
 # PyAudio initialization
 p = pyaudio.PyAudio()
