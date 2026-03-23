@@ -8,7 +8,6 @@ mqtt:
 
 default_mode: "off" # Possible values: "audio", "mirror", or "off"
 
-
 magic_mirror:
   url: "http(s)://[MAGIC_MIRROR_SERVER_IP_ADDRESS]:[PORT]" # Replace with your MagicMirror server URL
 
