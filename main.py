@@ -84,9 +84,9 @@ def start_mode(mode):
         logging.info(f"Published state: {current_mode} to {MQTT_STATE_TOPIC}")
 
 # MQTT Callbacks
-def on_connect(client, userdata, flags, rc):
+def on_connect(client, userdata, _connect_flags, reason_code, _properties):
     global current_mode
-    if rc == 0:
+    if not reason_code.is_failure:
         logging.info("Connected to MQTT broker.")
         client.subscribe(MQTT_COMMAND_TOPIC)
         logging.info(f"Subscribed to command topic: {MQTT_COMMAND_TOPIC}")
@@ -94,7 +94,7 @@ def on_connect(client, userdata, flags, rc):
         if current_mode:
             client.publish(MQTT_STATE_TOPIC, current_mode, retain=True)
     else:
-        logging.error(f"Failed to connect, return code: {rc}")
+        logging.error(f"Failed to connect, reason code: {reason_code}")
 
 def on_message(client, userdata, msg):
     payload = msg.payload.decode('utf-8').strip().lower()
@@ -105,7 +105,7 @@ def on_message(client, userdata, msg):
         logging.warning("Invalid payload. Please send 'audio', 'mirror', or 'off'.")
 
 if __name__ == '__main__':
-    mqtt_client = mqtt.Client()
+    mqtt_client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
     if MQTT_USER and MQTT_USER != "[MQTT_USERNAME]":
         mqtt_client.username_pw_set(MQTT_USER, MQTT_PASS)
 

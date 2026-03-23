@@ -8,27 +8,27 @@ DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )"
 cd "$DIR/.."
 
 # Install system dependencies required for building Python packages
-echo "Installing system dependencies..."
+echo "== Installing system dependencies... =="
 sudo apt update
 sudo apt install -y python3-venv python3-dev portaudio19-dev libsdl2-dev \
     libsdl2-image-dev libsdl2-mixer-dev libsdl2-ttf-dev chromium x11-xserver-utils
 
 # Create virtual environment
 if [ ! -d ".venv" ]; then
-    echo "Creating virtual environment..."
+    echo "== Creating virtual environment... =="
     python3 -m venv .venv
 else
     echo ".venv already exists, skipping."
 fi
 
 # Activate and install dependencies
-echo "Installing Python dependencies..."
+echo "== Installing Python dependencies... =="
 source .venv/bin/activate
 pip install --upgrade pip --quiet
 pip install -r requirements.txt
 
 # Install post-merge git hook
-echo "Installing git post-merge hook..."
+echo "== Installing git post-merge hook... =="
 HOOK_PATH="$(git rev-parse --git-dir)/hooks/post-merge"
 cp "$DIR/post-merge.hook" "$HOOK_PATH"
 chmod +x "$HOOK_PATH"

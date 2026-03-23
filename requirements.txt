@@ -1,5 +1,5 @@
-paho-mqtt==1.6.1
-PyYAML==6.0.1
-pygame>=2.5.2
-numpy==1.26.4
+paho-mqtt==2.1.0
+PyYAML==6.0.3
+pygame>=2.6.1
+numpy==2.4.3
 pyaudio>=0.2.14
