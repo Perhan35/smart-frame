@@ -55,7 +55,7 @@ def get_available_modes():
     modes = ['off']
     modes_dir = os.path.join(os.path.dirname(__file__), 'modes')
     if os.path.isdir(modes_dir):
-        for f in os.path.listdir(modes_dir):
+        for f in os.listdir(modes_dir):
             if f.endswith('_mode.py') or f.endswith('_mode.sh'):
                 mode_name = f.replace('_mode.py', '').replace('_mode.sh', '')
                 if mode_name not in modes:
