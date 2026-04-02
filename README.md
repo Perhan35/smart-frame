@@ -8,6 +8,12 @@ Designed for a 14" matte LCD to mimic an e-ink aesthetic.
 - **Screen**: 13.3" or 14" IPS Matte LCD (1920x1080) with HDMI controller board.
 - **Audio**: INMP441 Microphone (I2S) for digital audio capture.
 
+## Screenshots
+
+![SmartFrame Audio Mode](images/smartframe_audio_mode.png)
+
+![SmartFrame Mirror Mode](images/smartframe_mirror_mode.png)
+
 ## Linux Prerequisites (Raspberry Pi OS)
 
 1. Enable the I2S microphone modules in `/boot/config.txt` (or `/boot/firmware/config.txt`):
@@ -15,7 +21,7 @@ Designed for a 14" matte LCD to mimic an e-ink aesthetic.
 dtparam=i2s=on
 dtoverlay=googlevoicehat-soundcard
 ```
-*(A reboot is required)*.
+*(a reboot of the Raspberry Pi is required)*.
 
 ## SmartFrame Installation
 
@@ -25,7 +31,7 @@ cd smart-frame
 ./scripts/setup_pi.sh
 ```
 
-On some systems (Raspberry Pi Zero 2) the RAM is too low for pip to install the dependencies. In that case, you create a temporary directory:
+On some systems (Raspberry Pi Zero 2) the RAM is too low for pip to install the dependencies. In that case, you should create a temporary directory:
 
 ```bash
 mkdir -p ~/pip_tmp
@@ -44,24 +50,6 @@ The setup script creates `config.yaml` from `config.example.yaml` automatically.
   - `threshold_db_error`: Volume (in dB) where the dB text will turn red (default: 85).
 
 > **Note:** The setup script will warn you if `config.yaml` still has placeholder values and skip the service installation prompt until you configure it.
-
-## Local Development (macOS)
-
-To run the audio mode locally on macOS for testing (mirror mode requires Chromium kiosk and is Pi-only):
-
-**1. Run setup (first time only):**
-```bash
-./scripts/setup_dev.sh
-```
-This installs Homebrew dependencies (`portaudio`, SDL2, `pkg-config`) and creates a `.venv` with the Python packages.
-
-**2. Run:**
-```bash
-./run_dev.sh           # audio spectrum analyzer (windowed, default)
-./run_dev.sh main      # full orchestrator in offline mode (no MQTT required)
-```
-
-The audio mode opens an 800×600 window. Press `Esc` to quit.
 
 ## Usage
 

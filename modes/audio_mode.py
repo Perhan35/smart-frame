@@ -28,17 +28,24 @@ print("Initializing Audio Mode...")
 pygame.init()
 
 # Display initialization (1080p full screen, intended for a 14" LCD)
+if not os.environ.get('DISPLAY') and not os.environ.get('WAYLAND_DISPLAY'):
+    # Headless/Console mode detected, force KMSDRM
+    os.environ["SDL_VIDEODRIVER"] = "kmsdrm"
+    # Ensure it uses the primary DRM device
+    if not os.environ.get("SDL_DRM_DEVICE"):
+        os.environ["SDL_DRM_DEVICE"] = "/dev/dri/card0"
+
 try:
     screen = pygame.display.set_mode((1920, 1080), pygame.FULLSCREEN)
 except pygame.error:
-    # Fallback for local testing (if running outside of the Pi)
+    # Final fallback to dummy
     try:
-        screen = pygame.display.set_mode((800, 600))
-    except pygame.error:
-        # Headless mode fallback
         os.environ["SDL_VIDEODRIVER"] = "dummy"
         pygame.display.init()
         screen = pygame.display.set_mode((1, 1))
+    except pygame.error:
+        print("Fatal error: Could not initialize display.")
+        sys.exit(1)
 pygame.display.set_caption("SmartFrame - Audio Spectrum Analyzer")
 
 # Hide the mouse cursor

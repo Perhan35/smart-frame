@@ -34,11 +34,28 @@ mqtt_client = None
 
 def set_display_power(state: bool):
     try:
-        power_val = "1" if state else "0"
-        subprocess.run(['vcgencmd', 'display_power', power_val], check=True)
-        logging.info(f"Display power set to {state}")
+        if state:
+            # Try to turn it on via multiple methods
+            # 1. Wayland method (requires labwc or wayfire)
+            subprocess.run(['wlr-randr', '--output', 'HDMI-A-1', '--on'], stderr=subprocess.DEVNULL)
+            # 2. Legacy method
+            subprocess.run(['vcgencmd', 'display_power', '1'], stderr=subprocess.DEVNULL)
+            # 3. DPMS method (if X11 is used)
+            if os.environ.get('DISPLAY'):
+                subprocess.run(['xset', 'dpms', 'force', 'on'], stderr=subprocess.DEVNULL)
+            logging.info("Display power set to ON")
+        else:
+            # Try to turn it off via multiple methods
+            # 1. Wayland method (robust for KMS)
+            subprocess.run(['wlr-randr', '--output', 'HDMI-A-1', '--off'], stderr=subprocess.DEVNULL)
+            # 2. Legacy method (fallback)
+            subprocess.run(['vcgencmd', 'display_power', '0'], stderr=subprocess.DEVNULL)
+            # 3. DPMS method (if X11 is used)
+            if os.environ.get('DISPLAY'):
+                subprocess.run(['xset', 'dpms', 'force', 'off'], stderr=subprocess.DEVNULL)
+            logging.info("Display power set to OFF")
     except Exception as e:
-        logging.error(f"Failed to control display power (not on Raspberry Pi?): {e}")
+        logging.error(f"Error controlling display power: {e}")
 
 def stop_current_mode():
     global current_process

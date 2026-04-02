@@ -7,9 +7,9 @@ Wants=network-online.target
 Type=simple
 User={{USER}}
 WorkingDirectory={{WORKING_DIRECTORY}}
-# Graphical interfaces often require targeting DISPLAY=:0 (X11)
-Environment=DISPLAY=:0
-Environment=XAUTHORITY=/home/{{USER}}/.Xauthority
+# Graphical interfaces often require targeting a session, but mirror_mode.sh now handles this dynamically
+# Environment=DISPLAY=:0
+# Environment=XAUTHORITY=/home/{{USER}}/.Xauthority
 ExecStart={{WORKING_DIRECTORY}}/.venv/bin/python3 main.py
 Restart=on-failure
 RestartSec=10

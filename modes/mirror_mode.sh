@@ -37,26 +37,38 @@ if [ -n "$DISPLAY" ] && [ -z "$WAYLAND_DISPLAY" ]; then
     xset -dpms 2>/dev/null || true
 fi
 
-# Launch the task in the background and get the PID
+# Launch the task in the foreground or background depending on if we use labwc
 if command -v chromium-browser &> /dev/null; then
     CHROMIUM_CMD="chromium-browser"
 elif command -v chromium &> /dev/null; then
     CHROMIUM_CMD="chromium"
 else
-    echo "Warning: neither chromium nor chromium-browser not found. MagicMirror mode requires it."
-    # Sleep so the script doesn't exit immediately and fall back gracefully
-    sleep infinity
+    echo "Warning: neither chromium nor chromium-browser not found."
+    sleep 5
+    exit 1
 fi
 
-$CHROMIUM_CMD \
-  --noerrdialogs \
-  --disable-infobars \
-  --kiosk \
-  --check-for-update-interval=31536000 \
-  --disable-dev-shm-usage \
-  "$MIRROR_URL" > /dev/null 2>&1 &
+FLAGS="--noerrdialogs --disable-infobars --kiosk --check-for-update-interval=31536000 --disable-dev-shm-usage"
 
-CHROMIUM_PID=$!
+# Standardizing for Wayland (preferred on Debian Trixie)
+if [ -n "$WAYLAND_DISPLAY" ]; then
+    $CHROMIUM_CMD $FLAGS --ozone-platform=wayland "$MIRROR_URL" &
+    PID=$!
+elif [ -n "$DISPLAY" ]; then
+    $CHROMIUM_CMD $FLAGS "$MIRROR_URL" &
+    PID=$!
+elif command -v labwc &> /dev/null; then
+    # No display found, use labwc to launch chromium on the physical screen (KMS)
+    echo "No desktop session found. Launching via labwc (Wayland KMS)..."
+    export XDG_RUNTIME_DIR="/run/user/$(id -u)"
+    # Labwc will run then exit when Chromium finishes
+    labwc -s "$CHROMIUM_CMD $FLAGS --ozone-platform=wayland $MIRROR_URL" &
+    PID=$!
+else
+    echo "Error: No Wayland/X11 display found and labwc is not installed."
+    echo "Please run: sudo apt install labwc"
+    exit 1
+fi
 
 # Wait for Chromium to be killed by the parent Python script
-wait $CHROMIUM_PID
+wait $PID

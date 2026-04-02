@@ -7,11 +7,16 @@ echo "=== SmartFrame Raspberry Pi Setup ==="
 DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )"
 cd "$DIR/.."
 
-# Install system dependencies required for building Python packages
+# Install system dependencies required for building Python packages and running the display
 echo "== Installing system dependencies... =="
 sudo apt update
 sudo apt install -y python3-venv python3-dev portaudio19-dev libsdl2-dev \
-    libsdl2-image-dev libsdl2-mixer-dev libsdl2-ttf-dev chromium x11-xserver-utils
+    libsdl2-image-dev libsdl2-mixer-dev libsdl2-ttf-dev chromium x11-xserver-utils \
+    labwc wlr-randr wayland-utils seatd
+
+# Add user to required groups for hardware access (KMS, Audio, Seat management)
+echo "== Configuring user permissions... =="
+sudo usermod -a -G video,render,seat $USER
 
 # Create virtual environment
 if [ ! -d ".venv" ]; then
@@ -89,3 +94,10 @@ else
         echo "Skipped service installation. You can install it later with: ./scripts/install_service.sh"
     fi
 fi
+
+echo ""
+echo "!!! IMPORTANT !!!"
+echo "If this is your first time running setup, you MUST REBOOT for group"
+echo "permissions (video/render) to take effect:"
+echo "sudo reboot"
+echo ""
