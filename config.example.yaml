@@ -19,3 +19,4 @@ audio:
   device_index: null # Change to an integer if you need to select a specific microphone index
   threshold_db_warning: 60 # Volume in dB to trigger yellow/orange text color
   threshold_db_error: 85 # Volume in dB to trigger red text color
+  calibration_offset_db: 0 # Add or subtract the offset using a decibel meter or a phone/smartwatch app to calibrate.

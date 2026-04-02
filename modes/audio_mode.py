@@ -21,6 +21,7 @@ audio_config = config.get('audio', {})
 DEVICE_INDEX = audio_config.get('device_index')
 THRESHOLD_WARNING = audio_config.get('threshold_db_warning', 60)
 THRESHOLD_ERROR = audio_config.get('threshold_db_error', 85)
+CALIBRATION_OFFSET = audio_config.get('calibration_offset_db', 0)
 
 # Audio Configuration
 CHUNK = 1024
@@ -117,6 +118,22 @@ try:
             device_info = {'defaultSampleRate': 48000}
             
     stream_params['rate'] = int(device_info['defaultSampleRate'])
+    
+    # A-weighting gain pre-calculation
+    def get_a_weighting_gains(rate, chunk):
+        freqs = np.fft.rfftfreq(chunk, 1.0 / rate)
+        valid_freqs = np.where(freqs == 0, 1e-10, freqs)
+        f_sq = valid_freqs ** 2
+        const = (12194 ** 2) * (f_sq ** 2)
+        den = (f_sq + 20.6 ** 2) * np.sqrt((f_sq + 107.7 ** 2) * (f_sq + 737.9 ** 2)) * (f_sq + 12194 ** 2)
+        w = const / den
+        w *= 1.2589 # Normalize to 0dB at 1kHz
+        w[0] = 0.0
+        return w
+        
+    a_gains = get_a_weighting_gains(stream_params['rate'], CHUNK)
+    dt = CHUNK / stream_params['rate']
+    fast_alpha = 1.0 - np.exp(-dt / 0.125) # 125ms FAST integration time
         
     stream = p.open(**stream_params)
 except Exception as e:
@@ -127,12 +144,15 @@ except Exception as e:
 running = True
 clock = pygame.time.Clock()
 
-# Use default font, change size
-# Using Font(None, ...) instead of SysFont(None, ...) to avoid fc-list timeout on some systems
-font = pygame.font.Font(None, 128)
+font_large = pygame.font.Font(None, 160)
+font_medium = pygame.font.Font(None, 80)
+font_small = pygame.font.Font(None, 40)
 
 last_ui_update_time = time.time()
-last_displayed_db = 0
+last_displayed_dba = 0
+last_displayed_dbz = 0
+ema_rms_a = 0.0
+ema_rms_z = 0.0
 
 def signal_handler(sig, frame):
     global running
@@ -156,55 +176,82 @@ while running:
             # Read data from the I2S microphone
             data = np.frombuffer(stream.read(CHUNK, exception_on_overflow=False), dtype=np.int16)
             
-            # RMS calculation for volume (~ simplified dBA estimation)
-            rms = np.sqrt(np.mean(data.astype(np.float32)**2))
+            # Z-weighted (Raw) RMS
+            z_rms = np.sqrt(np.mean(data.astype(np.float32)**2))
             
-            # Only calculate target dB if there is sound
-            db = 20 * np.log10(rms) if rms > 0 else 0
+            # A-Weighted RMS
+            fft_complex = np.fft.rfft(data)
+            fft_aw = fft_complex * a_gains
+            data_aw = np.fft.irfft(fft_aw)
+            a_rms = np.sqrt(np.mean(data_aw**2))
             
-            # Keep track of the display value
+            # Fast Integration (EMA)
+            if ema_rms_z == 0:
+                ema_rms_z = z_rms
+                ema_rms_a = a_rms
+            else:
+                ema_rms_z = ema_rms_z + fast_alpha * (z_rms - ema_rms_z)
+                ema_rms_a = ema_rms_a + fast_alpha * (a_rms - ema_rms_a)
+                
+            db_z = (20 * np.log10(ema_rms_z) if ema_rms_z > 0 else 0) + CALIBRATION_OFFSET
+            db_a = (20 * np.log10(ema_rms_a) if ema_rms_a > 0 else 0) + CALIBRATION_OFFSET
+            
+            # Keep track of the display value (Peak hold)
             current_time = time.time()
-            if db > last_displayed_db:
-                last_displayed_db = db
+            if db_a > last_displayed_dba:
+                last_displayed_dba = db_a
+                last_displayed_dbz = db_z
                 last_ui_update_time = current_time
             elif current_time - last_ui_update_time >= 0.5:
-                last_displayed_db = db
+                last_displayed_dba = db_a
+                last_displayed_dbz = db_z
                 last_ui_update_time = current_time
                 
-            # Spectrum analyzer (basic FFT)
-            fft_data = np.abs(np.fft.rfft(data))
-            fft_data = fft_data[:100] # Keep the lower/mid frequencies
+            # Spectrum analyzer (basic FFT for visuals, unweighted for full bass visibility)
+            fft_data_vis = np.abs(fft_complex)[:100] # Keep the lower/mid frequencies
             
             # Draw the spectrum analyzer
-            num_bars = len(fft_data)
+            num_bars = len(fft_data_vis)
             bar_width = screen.get_width() // num_bars
             
-            for i, val in enumerate(fft_data):
+            for i, val in enumerate(fft_data_vis):
                 # Scale the value vertically
                 h = min(screen.get_height() - 150, int(val / 500)) 
                 # Draw a white bar (e-ink aesthetic)
                 pygame.draw.rect(screen, (220, 220, 220), 
                                  (i * bar_width, screen.get_height() - h, bar_width - 5, h))
             
-            # Determine color based on threshold
+            # Determine color based on threshold (Evaluate using dBA, professional standard)
             text_color = (144, 238, 144) # Light Green
-            if last_displayed_db >= THRESHOLD_ERROR:
+            if last_displayed_dba >= THRESHOLD_ERROR:
                 text_color = (255, 0, 0) # Red
-            elif last_displayed_db >= THRESHOLD_WARNING:
+            elif last_displayed_dba >= THRESHOLD_WARNING:
                 text_color = (255, 165, 0) # Orange
                 
-            # Display the volume level (dB)
-            db_text = font.render(f"{last_displayed_db:.0f} dB", True, text_color)
-            db_rect = db_text.get_rect()
-            db_rect.topright = (screen.get_width() - 50, 50)
-            screen.blit(db_text, db_rect)
+            # Render dBA text (Large)
+            dba_text = font_large.render(f"{last_displayed_dba:.1f} dBA", True, text_color)
+            dba_rect = dba_text.get_rect()
+            dba_rect.topright = (screen.get_width() - 50, 50)
+            screen.blit(dba_text, dba_rect)
+            
+            # Render dBZ text (Medium)
+            dbz_text = font_medium.render(f"{last_displayed_dbz:.1f} dBZ", True, (200, 200, 200)) # Grey
+            dbz_rect = dbz_text.get_rect()
+            dbz_rect.topright = (screen.get_width() - 50, dba_rect.bottom + 10)
+            screen.blit(dbz_text, dbz_rect)
+            
+            # Render "FAST" badge (Small)
+            badge_text = font_small.render("FAST RESPONSE", True, (150, 150, 150)) # Light Grey
+            badge_rect = badge_text.get_rect()
+            badge_rect.topright = (screen.get_width() - 50, dbz_rect.bottom + 10)
+            screen.blit(badge_text, badge_rect)
                 
         except Exception as e:
             print(f"Audio read error: {e}")
             break
     else:
         # Error message if microphone is unresponsive, keeping dark background to avoid screen flash
-        error_text = font.render("Waiting for I2S Microphone Signal...", True, (150, 150, 150))
+        error_text = font_medium.render("Waiting for I2S Microphone Signal...", True, (150, 150, 150))
         text_rect = error_text.get_rect(center=(screen.get_width()/2, screen.get_height()/2))
         screen.blit(error_text, text_rect)
 
