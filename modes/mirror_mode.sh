@@ -21,9 +21,11 @@ fi
 
 echo "Connecting to MagicMirror on: $MIRROR_URL"
 
-# Suppress X11 keyboard warnings (clipping keycodes) which are noisy on Wayland/XWayland
+# Suppress X11 keyboard warnings and hide cursors (X11/Wayland)
 export XKB_LOG_LEVEL=0
 export XCURSOR_SIZE=0
+export XCURSOR_THEME=None
+export COG_PLATFORM_FDO_SHOW_CURSOR=0
 
 # Browser selection
 if command -v chromium-browser &> /dev/null; then
@@ -111,6 +113,12 @@ if [ -n "$WAYLAND_DISPLAY" ]; then
         fi
     fi
     PID=$!
+    
+    # Kiosk trigger: In Wayland, tell the compositor to hide its cursor once the browser has loaded.
+    # This is highly effective for labwc without impacting other modes.
+    if command -v labwc-msg &> /dev/null; then
+        (sleep 3 && labwc-msg action HideCursor) &
+    fi
 elif [ -n "$DISPLAY" ]; then
     echo "Using X11 display: $DISPLAY"
     if [ "$SMARTFRAME_DEBUG" = "1" ]; then

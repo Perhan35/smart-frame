@@ -60,9 +60,11 @@ if not os.environ.get("DISPLAY") and not os.environ.get("WAYLAND_DISPLAY"):
     if not os.environ.get("SDL_DRM_DEVICE"):
         os.environ["SDL_DRM_DEVICE"] = "/dev/dri/card0"
 
-# Robust mouse hiding for various SDL backends
+# Robust mouse hiding for various SDL/Wayland/X11 backends
 os.environ["SDL_VIDEO_WAYLAND_HIDECURSOR"] = "1"
-os.environ["SDL_MOUSE_RELATIVE"] = "1"  # Can help prevent cursor boundary issues
+os.environ["SDL_MOUSE_RELATIVE"] = "1"
+os.environ["XCURSOR_SIZE"] = "0"
+os.environ["COG_PLATFORM_FDO_SHOW_CURSOR"] = "0"
 
 try:
     screen = pygame.display.set_mode((1920, 1080), pygame.FULLSCREEN)
@@ -80,8 +82,7 @@ pygame.display.set_caption("SmartFrame - Audio Spectrum Analyzer")
 # Hide the mouse cursor (Standard Pygame method)
 try:
     pygame.mouse.set_visible(False)
-    # Fallback: Create an invisible cursor for systems that ignore set_visible
-    # (8x8 cursor with 0x0 data)
+    # Fallback: Create a purely invisible 1x1 cursor
     pygame.mouse.set_cursor((8, 8), (0, 0), (0,) * 8, (0,) * 8)
 except pygame.error:
     pass
