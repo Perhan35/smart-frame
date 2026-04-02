@@ -6,6 +6,7 @@ import json
 import yaml
 import paho.mqtt.client as mqtt
 import logging
+import signal
 
 logging.basicConfig(level=logging.INFO)
 os.environ['PYGAME_HIDE_SUPPORT_PROMPT'] = '1'
@@ -129,11 +130,15 @@ def stop_current_mode():
     global current_process
     if current_process:
         logging.info(f"Stopping current mode: {current_mode}")
-        current_process.terminate()
         try:
+            # Kill the entire process group
+            os.killpg(os.getpgid(current_process.pid), signal.SIGTERM)
             current_process.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            current_process.kill()
+        except (subprocess.TimeoutExpired, ProcessLookupError, PermissionError):
+            try:
+                os.killpg(os.getpgid(current_process.pid), signal.SIGKILL)
+            except Exception:
+                pass
         current_process = None
 
 def get_available_modes():
@@ -170,11 +175,11 @@ def start_mode(mode):
         if os.path.exists(py_script):
             set_display_power(True)
             logging.info(f"Starting {mode.capitalize()} Mode (Python)...")
-            current_process = subprocess.Popen([sys.executable, py_script])
+            current_process = subprocess.Popen([sys.executable, py_script], start_new_session=True)
         elif os.path.exists(sh_script):
             set_display_power(True)
             logging.info(f"Starting {mode.capitalize()} Mode (Bash)...")
-            current_process = subprocess.Popen(['bash', sh_script])
+            current_process = subprocess.Popen(['bash', sh_script], start_new_session=True)
         else:
             available = get_available_modes()
             logging.warning(f"Unknown mode: {mode}. Available modes: {available}")

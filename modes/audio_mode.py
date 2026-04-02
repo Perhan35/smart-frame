@@ -5,6 +5,7 @@ import sys
 import os
 import yaml
 import ctypes
+import signal
 from contextlib import contextmanager
 
 # Load configuration
@@ -128,6 +129,14 @@ clock = pygame.time.Clock()
 # Use default font, change size
 # Using Font(None, ...) instead of SysFont(None, ...) to avoid fc-list timeout on some systems
 font = pygame.font.Font(None, 64)
+
+def signal_handler(sig, frame):
+    global running
+    print("Interrupt received, shutting down audio mode...")
+    running = False
+
+signal.signal(signal.SIGTERM, signal_handler)
+signal.signal(signal.SIGINT, signal_handler)
 
 while running:
     for event in pygame.event.get():

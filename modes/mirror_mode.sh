@@ -124,8 +124,8 @@ else
     exit 1
 fi
 
-# Cleanup unclutter on exit
-trap 'kill $UNCLUTTER_PID 2>/dev/null; rm -rf $LABWC_CONFIG_DIR' EXIT
+# Cleanup browser and unclutter on exit
+trap 'kill $PID 2>/dev/null; kill $UNCLUTTER_PID 2>/dev/null; rm -rf $LABWC_CONFIG_DIR' EXIT
 
 # Wait for Chromium to be killed by the parent Python script
 wait $PID
