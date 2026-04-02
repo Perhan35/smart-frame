@@ -45,21 +45,26 @@ echo "[$(date '+%Y-%m-%d %H:%M:%S')] Browser selected: $BROWSER_TYPE"
 
 # Performance and suppression flags for Chromium
 if [ "$BROWSER_TYPE" = "chromium" ]; then
+    # Persistent profile directory to enable caching (immensely speeds up subsequent starts)
+    PROFILE_DIR="$DIR/../.chromium_profile"
+    mkdir -p "$PROFILE_DIR"
+
     # --no-sandbox: fix "Failed global descriptor lookup" on Pi kiosk
-    # --process-per-site: limit process count to save RAM/CPU
-    # --enable-low-end-device-mode: optimize memory usage
-    # --js-flags: limit memory spikes from JS garbage collection
-    # Removed --disable-dev-shm-usage as it's faster to use shared memory for UI buffers
-    CHROME_FLAGS="--no-sandbox --noerrdialogs --disable-infobars --kiosk --hide-scrollbars --password-store=basic --check-for-update-interval=31536000 --no-memcheck --enable-low-end-device-mode --disable-site-isolation-trials --test-type --no-pings --disable-notifications --disable-sync --autoplay-policy=no-user-gesture-required --disable-background-networking --disable-component-update --disable-default-apps --disable-domain-reliability --disable-extensions --disable-features=Translate,OptimizationHints,MediaRouter,DialMediaRouteProvider,PrintPreview,OnDeviceModel,OptimizationGuideModelExecution,WebGPU,SkiaGraphite,WebRtcHideLocalIpsWithMdns,SafeBrowsing,GCM,OptimizationGuide --enable-gpu-rasterization --enable-zero-copy --ignore-certificate-errors --allow-running-insecure-content --remote-allow-origins=* --user-data-dir=/tmp/chromium_mirror --process-per-site --memory-pressure-thresholds=1,2 --js-flags='--max-old-space-size=128 --stack-size=1024' --disable-smooth-scrolling"
+    # --use-gl=egl: Resolve "eglCreateContext ES 3.0 failed" errors by forcing EGL
+    # --disable-client-side-phishing-detection: skip the "URL to scan" enterprise check delay
+    # --no-first-run --no-default-browser-check: skip initial setup logic
+    # --disable-features=...: Thoroughly disabling background bloat, scans, and cloud services (GCM, SafeBrowsing, etc.)
+    CHROME_FLAGS="--no-sandbox --noerrdialogs --disable-infobars --kiosk --hide-scrollbars --password-store=basic --check-for-update-interval=31536000 --no-memcheck --enable-low-end-device-mode --disable-site-isolation-trials --test-type --no-pings --disable-notifications --disable-sync --autoplay-policy=no-user-gesture-required --disable-background-networking --disable-component-update --disable-default-apps --disable-domain-reliability --disable-extensions --disable-client-side-phishing-detection --no-first-run --no-default-browser-check --disable-cloud-import --disable-breakpad --metrics-recording-only --disable-gcm-extension --disable-safe-browsing-extension-api --safebrowsing-disable-auto-update --safebrowsing-disable-download-protection --disable-features=Translate,OptimizationHints,MediaRouter,DialMediaRouteProvider,PrintPreview,OnDeviceModel,OptimizationGuideModelExecution,WebGPU,SkiaGraphite,WebRtcHideLocalIpsWithMdns,SafeBrowsing,GCM,OptimizationGuide,EnterpriseDataProtectionAnalysis --enable-gpu-rasterization --enable-zero-copy --use-gl=egl --ignore-certificate-errors --allow-running-insecure-content --remote-allow-origins=* --user-data-dir=$PROFILE_DIR --memory-pressure-thresholds=1,2 --js-flags='--max-old-space-size=128 --stack-size=1024' --disable-smooth-scrolling"
 
     # Conditional logging for debugging
     if [ "$SMARTFRAME_DEBUG" = "1" ]; then
         CHROME_FLAGS="$CHROME_FLAGS --enable-logging=stderr --v=1"
     fi
     
-    # Balance: nice -n 5 prioritizing SSH/system without noticeably slowing the browser
-    # ionice -c 2 -n 7: Low priority "best effort" I/O to avoid system stutters
-    LAUNCH_WRAPPER="nice -n 5 ionice -c 2 -n 7"
+    # Priority: Mirror Mode is the primary focus. Lower nice value (higher priority) during startup.
+    # We use nice -n 0 (default) or even -5 if we want it to grab resources during load.
+    # ionice -c 2 -n 4: Balanced I/O priority.
+    LAUNCH_WRAPPER="nice -n 0 ionice -c 2 -n 4"
     FULL_CMD="$LAUNCH_WRAPPER $BROWSER_CMD $CHROME_FLAGS"
 
 else
