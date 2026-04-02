@@ -12,7 +12,7 @@ echo "== Installing system dependencies... =="
 sudo apt update
 sudo apt install -y python3-venv python3-dev portaudio19-dev libsdl2-dev \
     libsdl2-image-dev libsdl2-mixer-dev libsdl2-ttf-dev chromium x11-xserver-utils \
-    labwc wlr-randr wayland-utils seatd cog
+    labwc wlr-randr wayland-utils seatd cog unclutter-xfixes
 
 # Add user to required groups for hardware access (KMS, Audio, Seat management)
 echo "== Configuring user permissions... =="

@@ -67,11 +67,20 @@ if [ "$BROWSER_TYPE" = "chromium" ]; then
     # OnDeviceModel,OptimizationGuideModelExecution: Stops Chromium from trying to load AI models (fixes "on_device_model service disconnect" error)
     # WebGPU,SkiaGraphite: Disables high-end GPU features that cause warnings on Pi
     # Translate,OptimizationHints,MediaRouter: Removes unnecessary background services
-    CHROME_FLAGS="--noerrdialogs --disable-infobars --kiosk --check-for-update-interval=31536000 --disable-dev-shm-usage --no-memcheck --enable-low-end-device-mode --disable-site-isolation-trials --test-type --no-pings --disable-notifications --disable-sync --disable-features=Translate,OptimizationHints,MediaRouter,DialMediaRouteProvider,PrintPreview,OnDeviceModel,OptimizationGuideModelExecution,WebGPU,SkiaGraphite --disable-gpu --user-data-dir=/tmp/chromium_mirror"
+    CHROME_FLAGS="--noerrdialogs --disable-infobars --kiosk --hide-scrollbars --password-store=basic --check-for-update-interval=31536000 --disable-dev-shm-usage --no-memcheck --enable-low-end-device-mode --disable-site-isolation-trials --test-type --no-pings --disable-notifications --disable-sync --disable-features=Translate,OptimizationHints,MediaRouter,DialMediaRouteProvider,PrintPreview,OnDeviceModel,OptimizationGuideModelExecution,WebGPU,SkiaGraphite --disable-gpu --user-data-dir=/tmp/chromium_mirror"
     FULL_CMD="$BROWSER_CMD $CHROME_FLAGS"
 else
     # Cog specific setup 
     FULL_CMD="$BROWSER_CMD"
+fi
+
+# Run unclutter in the background as a fallback for X11/XWayland cursors
+if command -v unclutter-xfixes &> /dev/null; then
+    unclutter-xfixes --idle 0.1 --fork &
+    UNCLUTTER_PID=$!
+elif command -v unclutter &> /dev/null; then
+    unclutter -idle 0.1 -root &
+    UNCLUTTER_PID=$!
 fi
 
 # Standardizing for Wayland (preferred on Debian Trixie)
@@ -90,11 +99,23 @@ elif command -v labwc &> /dev/null; then
     echo "No desktop session found. Launching via labwc (Wayland KMS)..."
     export XDG_RUNTIME_DIR="/run/user/$(id -u)"
     
-    # Labwc will run then exit when the browser finishes
+    # Create a temporary config to hide the cursor in labwc
+    LABWC_CONFIG_DIR=$(mktemp -d /tmp/labwc-XXXXXX)
+    mkdir -p "$LABWC_CONFIG_DIR/labwc"
+    cat <<EOF > "$LABWC_CONFIG_DIR/labwc/rc.xml"
+<labwc_config>
+  <core>
+    <cursor>
+      <timeout>1</timeout>
+    </cursor>
+  </core>
+</labwc_config>
+EOF
+
     if [ "$BROWSER_TYPE" = "cog" ]; then
-        labwc -s "$FULL_CMD $MIRROR_URL" &> /dev/null &
+        labwc -c "$LABWC_CONFIG_DIR/labwc" -s "$FULL_CMD $MIRROR_URL" &> /dev/null &
     else
-        labwc -s "$FULL_CMD --ozone-platform=wayland $MIRROR_URL" &> /dev/null &
+        labwc -c "$LABWC_CONFIG_DIR/labwc" -s "$FULL_CMD --ozone-platform=wayland $MIRROR_URL" &> /dev/null &
     fi
     PID=$!
 else
@@ -102,6 +123,9 @@ else
     echo "Please run: sudo apt install labwc"
     exit 1
 fi
+
+# Cleanup unclutter on exit
+trap 'kill $UNCLUTTER_PID 2>/dev/null; rm -rf $LABWC_CONFIG_DIR' EXIT
 
 # Wait for Chromium to be killed by the parent Python script
 wait $PID
