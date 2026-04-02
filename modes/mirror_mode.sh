@@ -49,7 +49,14 @@ if [ "$BROWSER_TYPE" = "chromium" ]; then
     # Added --no-sandbox to fix "Failed global descriptor lookup" error on Pi kiosk setups
     # Added wide range of suppression flags to disable GCM/Sync/Networking noise and speed up startup
     CHROME_FLAGS="--no-sandbox --noerrdialogs --disable-infobars --kiosk --hide-scrollbars --password-store=basic --check-for-update-interval=31536000 --disable-dev-shm-usage --no-memcheck --enable-low-end-device-mode --disable-site-isolation-trials --test-type --no-pings --disable-notifications --disable-sync --autoplay-policy=no-user-gesture-required --disable-background-networking --disable-component-update --disable-default-apps --disable-domain-reliability --disable-extensions --disable-features=Translate,OptimizationHints,MediaRouter,DialMediaRouteProvider,PrintPreview,OnDeviceModel,OptimizationGuideModelExecution,WebGPU,SkiaGraphite,WebRtcHideLocalIpsWithMdns,SafeBrowsing,GCM,OptimizationGuide --enable-gpu-rasterization --enable-zero-copy --ignore-certificate-errors --user-data-dir=/tmp/chromium_mirror"
+    
+    # Conditional logging for debugging
+    if [ "$SMARTFRAME_DEBUG" = "1" ]; then
+        CHROME_FLAGS="$CHROME_FLAGS --enable-logging=stderr --v=1"
+    fi
+    
     FULL_CMD="$BROWSER_CMD $CHROME_FLAGS"
+
 
 
 else
