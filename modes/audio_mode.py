@@ -6,6 +6,7 @@ import os
 import yaml
 import ctypes
 import signal
+import time
 from contextlib import contextmanager
 
 # Load configuration
@@ -128,7 +129,10 @@ clock = pygame.time.Clock()
 
 # Use default font, change size
 # Using Font(None, ...) instead of SysFont(None, ...) to avoid fc-list timeout on some systems
-font = pygame.font.Font(None, 64)
+font = pygame.font.Font(None, 128)
+
+last_ui_update_time = time.time()
+last_displayed_db = 0
 
 def signal_handler(sig, frame):
     global running
@@ -158,6 +162,15 @@ while running:
             # Only calculate target dB if there is sound
             db = 20 * np.log10(rms) if rms > 0 else 0
             
+            # Keep track of the display value
+            current_time = time.time()
+            if db > last_displayed_db:
+                last_displayed_db = db
+                last_ui_update_time = current_time
+            elif current_time - last_ui_update_time >= 0.5:
+                last_displayed_db = db
+                last_ui_update_time = current_time
+                
             # Spectrum analyzer (basic FFT)
             fft_data = np.abs(np.fft.rfft(data))
             fft_data = fft_data[:100] # Keep the lower/mid frequencies
@@ -174,15 +187,17 @@ while running:
                                  (i * bar_width, screen.get_height() - h, bar_width - 5, h))
             
             # Determine color based on threshold
-            text_color = (255, 255, 255) # White
-            if db >= THRESHOLD_ERROR:
+            text_color = (144, 238, 144) # Light Green
+            if last_displayed_db >= THRESHOLD_ERROR:
                 text_color = (255, 0, 0) # Red
-            elif db >= THRESHOLD_WARNING:
+            elif last_displayed_db >= THRESHOLD_WARNING:
                 text_color = (255, 165, 0) # Orange
                 
             # Display the volume level (dB)
-            db_text = font.render(f"Volume : {db:.1f} dB", True, text_color)
-            screen.blit(db_text, (50, 50))
+            db_text = font.render(f"{last_displayed_db:.0f} dB", True, text_color)
+            db_rect = db_text.get_rect()
+            db_rect.topright = (screen.get_width() - 50, 50)
+            screen.blit(db_text, db_rect)
                 
         except Exception as e:
             print(f"Audio read error: {e}")
