@@ -45,21 +45,22 @@ echo "[$(date '+%Y-%m-%d %H:%M:%S')] Browser selected: $BROWSER_TYPE"
 
 # Performance and suppression flags for Chromium
 if [ "$BROWSER_TYPE" = "chromium" ]; then
-    # Removed --disable-gpu as it causes black screens on modern Pi Wayland sessions
-    # Added --no-sandbox to fix "Failed global descriptor lookup" error on Pi kiosk setups
-    # Added wide range of suppression flags to disable GCM/Sync/Networking noise and speed up startup
-    # Added --allow-running-insecure-content to fix missing icons/fonts when mixing HTTP/HTTPS origins
-    CHROME_FLAGS="--no-sandbox --noerrdialogs --disable-infobars --kiosk --hide-scrollbars --password-store=basic --check-for-update-interval=31536000 --disable-dev-shm-usage --no-memcheck --enable-low-end-device-mode --disable-site-isolation-trials --test-type --no-pings --disable-notifications --disable-sync --autoplay-policy=no-user-gesture-required --disable-background-networking --disable-component-update --disable-default-apps --disable-domain-reliability --disable-extensions --disable-features=Translate,OptimizationHints,MediaRouter,DialMediaRouteProvider,PrintPreview,OnDeviceModel,OptimizationGuideModelExecution,WebGPU,SkiaGraphite,WebRtcHideLocalIpsWithMdns,SafeBrowsing,GCM,OptimizationGuide --enable-gpu-rasterization --enable-zero-copy --ignore-certificate-errors --allow-running-insecure-content --remote-allow-origins=* --user-data-dir=/tmp/chromium_mirror"
+    # --no-sandbox: fix "Failed global descriptor lookup" on Pi kiosk
+    # --process-per-site: limit process count to save RAM/CPU
+    # --enable-low-end-device-mode: optimize memory usage
+    # --js-flags: limit memory spikes from JS garbage collection
+    # Removed --disable-dev-shm-usage as it's faster to use shared memory for UI buffers
+    CHROME_FLAGS="--no-sandbox --noerrdialogs --disable-infobars --kiosk --hide-scrollbars --password-store=basic --check-for-update-interval=31536000 --no-memcheck --enable-low-end-device-mode --disable-site-isolation-trials --test-type --no-pings --disable-notifications --disable-sync --autoplay-policy=no-user-gesture-required --disable-background-networking --disable-component-update --disable-default-apps --disable-domain-reliability --disable-extensions --disable-features=Translate,OptimizationHints,MediaRouter,DialMediaRouteProvider,PrintPreview,OnDeviceModel,OptimizationGuideModelExecution,WebGPU,SkiaGraphite,WebRtcHideLocalIpsWithMdns,SafeBrowsing,GCM,OptimizationGuide --enable-gpu-rasterization --enable-zero-copy --ignore-certificate-errors --allow-running-insecure-content --remote-allow-origins=* --user-data-dir=/tmp/chromium_mirror --process-per-site --memory-pressure-thresholds=1,2 --js-flags='--max-old-space-size=128 --stack-size=1024' --disable-smooth-scrolling"
 
-    
     # Conditional logging for debugging
     if [ "$SMARTFRAME_DEBUG" = "1" ]; then
         CHROME_FLAGS="$CHROME_FLAGS --enable-logging=stderr --v=1"
     fi
     
-    FULL_CMD="$BROWSER_CMD $CHROME_FLAGS"
-
-
+    # Balance: nice -n 5 prioritizing SSH/system without noticeably slowing the browser
+    # ionice -c 2 -n 7: Low priority "best effort" I/O to avoid system stutters
+    LAUNCH_WRAPPER="nice -n 5 ionice -c 2 -n 7"
+    FULL_CMD="$LAUNCH_WRAPPER $BROWSER_CMD $CHROME_FLAGS"
 
 else
     # Cog specific setup 
@@ -71,7 +72,9 @@ else
     export XDG_CACHE_HOME="/tmp/cog-cache-$USER-$RANDOM"
     mkdir -p "$XDG_DATA_HOME" "$XDG_CACHE_HOME"
     export WPE_G_P_R_S_M_ALLOW_FORCE_GL=1
-    FULL_CMD="$BROWSER_CMD"
+    
+    LAUNCH_WRAPPER="nice -n 15 ionice -c 3"
+    FULL_CMD="$LAUNCH_WRAPPER $BROWSER_CMD"
 fi
 
 # Run unclutter in the background as a fallback for X11/XWayland cursors
