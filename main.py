@@ -34,26 +34,36 @@ mqtt_client = None
 
 def set_display_power(state: bool):
     try:
+        # Auto-detect HDMI output for wlr-randr
+        output_name = "HDMI-A-1" # Default
+        try:
+            # Try to find the connected HDMI output
+            wlr_output = subprocess.check_output(['wlr-randr'], stderr=subprocess.DEVNULL).decode()
+            for line in wlr_output.split('\n'):
+                if 'HDMI' in line and ' ' in line:
+                    output_name = line.split(' ')[0]
+                    break
+        except Exception:
+            pass
+
         if state:
-            # Try to turn it on via multiple methods
-            # 1. Wayland method (requires labwc or wayfire)
-            subprocess.run(['wlr-randr', '--output', 'HDMI-A-1', '--on'], stderr=subprocess.DEVNULL)
+            # 1. Wayland method (preferred)
+            subprocess.run(['wlr-randr', '--output', output_name, '--on'], stderr=subprocess.DEVNULL)
             # 2. Legacy method
             subprocess.run(['vcgencmd', 'display_power', '1'], stderr=subprocess.DEVNULL)
-            # 3. DPMS method (if X11 is used)
+            # 3. DPMS method
             if os.environ.get('DISPLAY'):
                 subprocess.run(['xset', 'dpms', 'force', 'on'], stderr=subprocess.DEVNULL)
-            logging.info("Display power set to ON")
+            logging.info(f"Display power set to ON (Output: {output_name})")
         else:
-            # Try to turn it off via multiple methods
-            # 1. Wayland method (robust for KMS)
-            subprocess.run(['wlr-randr', '--output', 'HDMI-A-1', '--off'], stderr=subprocess.DEVNULL)
-            # 2. Legacy method (fallback)
+            # 1. Wayland method
+            subprocess.run(['wlr-randr', '--output', output_name, '--off'], stderr=subprocess.DEVNULL)
+            # 2. Legacy method
             subprocess.run(['vcgencmd', 'display_power', '0'], stderr=subprocess.DEVNULL)
-            # 3. DPMS method (if X11 is used)
+            # 3. DPMS method
             if os.environ.get('DISPLAY'):
                 subprocess.run(['xset', 'dpms', 'force', 'off'], stderr=subprocess.DEVNULL)
-            logging.info("Display power set to OFF")
+            logging.info(f"Display power set to OFF (Output: {output_name})")
     except Exception as e:
         logging.error(f"Error controlling display power: {e}")
 

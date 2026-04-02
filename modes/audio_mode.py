@@ -5,6 +5,7 @@ import sys
 import os
 import yaml
 import ctypes
+from contextlib import contextmanager
 
 # Load configuration
 config_path = os.path.join(os.path.dirname(__file__), '..', 'config.yaml')
@@ -24,8 +25,23 @@ CHUNK = 1024
 FORMAT = pyaudio.paInt16
 CHANNELS = 1
 
+@contextmanager
+def ignore_stderr():
+    """Context manager to temporarily suppress stderr."""
+    devnull = os.open(os.devnull, os.O_WRONLY)
+    old_stderr = os.dup(2)
+    sys.stderr.flush()
+    os.dup2(devnull, 2)
+    os.close(devnull)
+    try:
+        yield
+    finally:
+        os.dup2(old_stderr, 2)
+        os.close(old_stderr)
+
 print("Initializing Audio Mode...")
-pygame.init()
+with ignore_stderr():
+    pygame.init()
 
 # Display initialization (1080p full screen, intended for a 14" LCD)
 if not os.environ.get('DISPLAY') and not os.environ.get('WAYLAND_DISPLAY'):
@@ -71,7 +87,8 @@ except OSError:
         pass
 
 # PyAudio initialization
-p = pyaudio.PyAudio()
+with ignore_stderr():
+    p = pyaudio.PyAudio()
 
 try:
     stream_params = {

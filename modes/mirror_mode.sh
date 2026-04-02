@@ -22,10 +22,13 @@ echo "Connecting to MagicMirror on: $MIRROR_URL"
 # Support running from SSH or systemd by auto-detecting display environment
 if [ -z "$DISPLAY" ] && [ -z "$WAYLAND_DISPLAY" ]; then
     if [ -n "$(pgrep -x labwc)" ] || [ -n "$(pgrep -x wayfire)" ]; then
-        # Default to wayland-1 which is common on Pi OS Bookworm
-        export WAYLAND_DISPLAY="wayland-1"
+        # Default to wayland-0 or wayland-1 which is common on Pi OS Bookworm
+        export WAYLAND_DISPLAY="${WAYLAND_DISPLAY:-wayland-0}"
+        if [ ! -S "$XDG_RUNTIME_DIR/$WAYLAND_DISPLAY" ]; then
+            export WAYLAND_DISPLAY="wayland-1"
+        fi
         export XDG_RUNTIME_DIR="/run/user/$(id -u)"
-    else
+    elif [ -S "/tmp/.X11-unix/X0" ]; then
         export DISPLAY=":0"
     fi
 fi
