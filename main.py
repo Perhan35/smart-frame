@@ -7,6 +7,7 @@ import yaml
 import paho.mqtt.client as mqtt
 import logging
 import signal
+import socket
 
 # Load configuration
 config_path = os.path.join(os.path.dirname(__file__), 'config.yaml')
@@ -53,39 +54,54 @@ def setup_display_env():
     """Detect and validate the current display environment (Wayland/X11)."""
     uid = os.getuid()
     
+    def is_wayland_reachable(display_name):
+        """Check if a Wayland socket is actually listening."""
+        runtime_dir = os.environ.get('XDG_RUNTIME_DIR', f"/run/user/{uid}")
+        socket_path = os.path.join(runtime_dir, display_name)
+        try:
+            with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
+                s.settimeout(0.1)
+                s.connect(socket_path)
+            return True
+        except Exception:
+            return False
+
+    def is_x11_active():
+        """Check if X server is running by looking for the process."""
+        for pattern in ['Xorg', 'X']:
+            if subprocess.run(['pgrep', '-u', str(uid), '-x', pattern], capture_output=True).returncode == 0:
+                return True
+        return False
+
     # 1. Validate existing environment - delete if stale
-    for env_var in ['WAYLAND_DISPLAY', 'DISPLAY']:
-        if env_var in os.environ:
-            is_valid = False
-            # Check for actual process activity before trusting the environment variable
-            pgrep_patterns = ['labwc', 'wayfire'] if env_var == 'WAYLAND_DISPLAY' else ['Xorg', 'X']
-            for pattern in pgrep_patterns:
-                if subprocess.run(['pgrep', '-u', str(uid), '-x', pattern], capture_output=True).returncode == 0:
-                    is_valid = True
-                    break
-            
-            if not is_valid:
-                logging.debug(f"Cleaning stale {env_var}: {os.environ[env_var]}")
-                del os.environ[env_var]
-                # Clear session cache if the environment changed
-                _working_methods['session'] = None
+    if 'WAYLAND_DISPLAY' in os.environ:
+        if not is_wayland_reachable(os.environ['WAYLAND_DISPLAY']):
+            logging.debug(f"Cleaning stale WAYLAND_DISPLAY: {os.environ['WAYLAND_DISPLAY']}")
+            del os.environ['WAYLAND_DISPLAY']
+            _working_methods['session'] = None
+
+    if 'DISPLAY' in os.environ:
+        if not is_x11_active():
+            logging.debug(f"Cleaning stale DISPLAY: {os.environ['DISPLAY']}")
+            del os.environ['DISPLAY']
+            _working_methods['session'] = None
 
     # 2. Force default XDG_RUNTIME_DIR if missing (critical for Wayland)
     if 'XDG_RUNTIME_DIR' not in os.environ:
         os.environ['XDG_RUNTIME_DIR'] = f"/run/user/{uid}"
 
-    # 3. Auto-detection: Search for running sessions if none are set
+    # 3. Auto-detection: Search for running sessions
     if 'WAYLAND_DISPLAY' not in os.environ and 'DISPLAY' not in os.environ:
-        runtime_dir = os.environ['XDG_RUNTIME_DIR']
         # Check standard Wayland sockets
         for i in range(2):
-            if os.path.exists(os.path.join(runtime_dir, f'wayland-{i}')):
-                os.environ['WAYLAND_DISPLAY'] = f'wayland-{i}'
-                logging.info(f"Auto-detected Wayland: {os.environ['WAYLAND_DISPLAY']}")
+            name = f'wayland-{i}'
+            if is_wayland_reachable(name):
+                os.environ['WAYLAND_DISPLAY'] = name
+                logging.info(f"Auto-detected Wayland: {name}")
                 return
         
         # Check standard X11 socket
-        if os.path.exists('/tmp/.X11-unix/X0'):
+        if is_x11_active() and os.path.exists('/tmp/.X11-unix/X0'):
             os.environ['DISPLAY'] = ':0'
             logging.info("Auto-detected X11: :0")
 
