@@ -216,12 +216,20 @@ while running:
             
             # If stereo is used, average the channels to mono for DSP
             if CHANNELS > 1:
-                data = data.reshape(-1, CHANNELS).mean(axis=1).astype(np.int16)
+                data = data.reshape(-1, CHANNELS).mean(axis=1)
+            else:
+                data = data.astype(np.float32)
             
-            # Z-weighted (Raw) RMS
-            z_rms = np.sqrt(np.mean(data.astype(np.float32)**2))
+            # --- IMPROVED DSP BLOCK ---
+            # 1. DC Offset Removal (Mean Subtraction)
+            # This fixes the "51 dBZ in silence" issue by centering the wave at 0
+            data -= np.mean(data)
             
-            # A-Weighted RMS
+            # 2. Z-weighted (Raw) RMS
+            z_rms = np.sqrt(np.mean(data**2))
+            
+            # 4. A-Weighted RMS
+            # Our A-weighting gains already act as a bandpass filter
             fft_complex = np.fft.rfft(data)
             fft_aw = fft_complex * a_gains
             data_aw = np.fft.irfft(fft_aw)
@@ -235,8 +243,9 @@ while running:
                 ema_rms_z = ema_rms_z + fast_alpha * (z_rms - ema_rms_z)
                 ema_rms_a = ema_rms_a + fast_alpha * (a_rms - ema_rms_a)
                 
-            db_z = (20 * np.log10(ema_rms_z) if ema_rms_z > 0 else 0) + CALIBRATION_OFFSET
-            db_a = (20 * np.log10(ema_rms_a) if ema_rms_a > 0 else 0) + CALIBRATION_OFFSET
+            # Log calculation with a small epsilon to avoid log(0)
+            db_z = (20 * np.log10(max(1e-9, ema_rms_z))) + CALIBRATION_OFFSET
+            db_a = (20 * np.log10(max(1e-9, ema_rms_a))) + CALIBRATION_OFFSET
             
             # Keep track of the display value (Peak hold)
             current_time = time.time()
