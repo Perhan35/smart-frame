@@ -33,10 +33,40 @@ current_process = None
 current_mode = None
 mqtt_client = None
 
+def setup_display_env():
+    """Detect and set up environment variables for Wayland/X11 access."""
+    if 'DISPLAY' not in os.environ and 'WAYLAND_DISPLAY' not in os.environ:
+        try:
+            # Check for common Wayland compositors on Raspberry Pi
+            pgrep = subprocess.run(['pgrep', '-x', 'labwc'], capture_output=True)
+            if pgrep.returncode != 0:
+                pgrep = subprocess.run(['pgrep', '-x', 'wayfire'], capture_output=True)
+            
+            if pgrep.returncode == 0:
+                user_id = os.getuid()
+                runtime_dir = f"/run/user/{user_id}"
+                os.environ['XDG_RUNTIME_DIR'] = runtime_dir
+                
+                # Try wayland-0 then wayland-1
+                if os.path.exists(os.path.join(runtime_dir, 'wayland-0')):
+                    os.environ['WAYLAND_DISPLAY'] = 'wayland-0'
+                elif os.path.exists(os.path.join(runtime_dir, 'wayland-1')):
+                    os.environ['WAYLAND_DISPLAY'] = 'wayland-1'
+                
+                if 'WAYLAND_DISPLAY' in os.environ:
+                    logging.info(f"Auto-detected Wayland environment: {os.environ['WAYLAND_DISPLAY']}")
+            elif os.path.exists('/tmp/.X11-unix/X0'):
+                os.environ['DISPLAY'] = ':0'
+                logging.info("Auto-detected X11 environment: :0")
+        except Exception as e:
+            logging.debug(f"Environment detection helper failed: {e}")
+
 def set_display_power(state: bool):
     try:
+        setup_display_env()
+        
         # Auto-detect HDMI output for wlr-randr
-        output_name = "HDMI-A-1" # Default
+        output_name = "HDMI-A-1" # Default fallback
         try:
             # Try to find the connected HDMI output
             wlr_output = subprocess.check_output(['wlr-randr'], stderr=subprocess.DEVNULL).decode()
@@ -47,24 +77,51 @@ def set_display_power(state: bool):
         except Exception:
             pass
 
+        success = False
         if state:
             # 1. Wayland method (preferred)
-            subprocess.run(['wlr-randr', '--output', output_name, '--on'], stderr=subprocess.DEVNULL)
+            if os.environ.get('WAYLAND_DISPLAY'):
+                res = subprocess.run(['wlr-randr', '--output', output_name, '--on'], capture_output=True)
+                if res.returncode == 0:
+                    success = True
+            
             # 2. Legacy method
-            subprocess.run(['vcgencmd', 'display_power', '1'], stderr=subprocess.DEVNULL)
+            res = subprocess.run(['vcgencmd', 'display_power', '1'], capture_output=True)
+            if res.returncode == 0:
+                success = True
+            
             # 3. DPMS method
             if os.environ.get('DISPLAY'):
-                subprocess.run(['xset', 'dpms', 'force', 'on'], stderr=subprocess.DEVNULL)
-            logging.info(f"Display power set to ON (Output: {output_name})")
+                res = subprocess.run(['xset', 'dpms', 'force', 'on'], capture_output=True)
+                if res.returncode == 0:
+                    success = True
+                
+            if success:
+                logging.info(f"Display power set to ON (Output: {output_name})")
+            else:
+                logging.warning(f"Failed to set display power to ON. (Output: {output_name})")
         else:
             # 1. Wayland method
-            subprocess.run(['wlr-randr', '--output', output_name, '--off'], stderr=subprocess.DEVNULL)
+            if os.environ.get('WAYLAND_DISPLAY'):
+                res = subprocess.run(['wlr-randr', '--output', output_name, '--off'], capture_output=True)
+                if res.returncode == 0:
+                    success = True
+            
             # 2. Legacy method
-            subprocess.run(['vcgencmd', 'display_power', '0'], stderr=subprocess.DEVNULL)
+            res = subprocess.run(['vcgencmd', 'display_power', '0'], capture_output=True)
+            if res.returncode == 0:
+                success = True
+            
             # 3. DPMS method
             if os.environ.get('DISPLAY'):
-                subprocess.run(['xset', 'dpms', 'force', 'off'], stderr=subprocess.DEVNULL)
-            logging.info(f"Display power set to OFF (Output: {output_name})")
+                res = subprocess.run(['xset', 'dpms', 'force', 'off'], capture_output=True)
+                if res.returncode == 0:
+                    success = True
+
+            if success:
+                logging.info(f"Display power set to OFF (Output: {output_name})")
+            else:
+                logging.warning(f"Failed to set display power to OFF. (Output: {output_name})")
     except Exception as e:
         logging.error(f"Error controlling display power: {e}")
 
