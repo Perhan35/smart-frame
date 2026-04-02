@@ -43,171 +43,142 @@ current_process = None
 current_mode = None
 mqtt_client = None
 
+# Discovery cache to avoid repeated slow subprocess calls
+_working_methods = {
+    'session': None, # Cached 'Wayland (wlr-randr)' or 'X11 (xset)'
+    'hardware': []    # List of low-level methods (vcgencmd, fb0, etc) that work
+}
+
 def setup_display_env():
-    """Detect and set up environment variables for Wayland/X11 access."""
-    # 1. Validate existing environment
-    if 'WAYLAND_DISPLAY' in os.environ:
-        runtime_dir = os.environ.get('XDG_RUNTIME_DIR', f"/run/user/{os.getuid()}")
-        socket_path = os.path.join(runtime_dir, os.environ['WAYLAND_DISPLAY'])
-        if not os.path.exists(socket_path):
-            logging.debug(f"Invalid WAYLAND_DISPLAY '{os.environ['WAYLAND_DISPLAY']}' (no socket at {socket_path}). Clearing.")
-            del os.environ['WAYLAND_DISPLAY']
-
-    if 'DISPLAY' in os.environ:
-        x_socket = f"/tmp/.X11-unix/X{os.environ['DISPLAY'].replace(':', '')}"
-        if not os.path.exists(x_socket):
-            logging.debug(f"Invalid DISPLAY '{os.environ['DISPLAY']}' (no socket at {x_socket}). Clearing.")
-            del os.environ['DISPLAY']
-
-    # 2. Attempt auto-detection if none found or invalid
-    if 'DISPLAY' not in os.environ and 'WAYLAND_DISPLAY' not in os.environ:
-        try:
-            # Set default XDG_RUNTIME_DIR if missing
-            if 'XDG_RUNTIME_DIR' not in os.environ:
-                os.environ['XDG_RUNTIME_DIR'] = f"/run/user/{os.getuid()}"
-
-            # Check for common Wayland compositors on Raspberry Pi
-            pgrep = subprocess.run(['pgrep', '-x', 'labwc'], capture_output=True)
-            if pgrep.returncode != 0:
-                pgrep = subprocess.run(['pgrep', '-x', 'wayfire'], capture_output=True)
+    """Detect and validate the current display environment (Wayland/X11)."""
+    uid = os.getuid()
+    
+    # 1. Validate existing environment - delete if stale
+    for env_var in ['WAYLAND_DISPLAY', 'DISPLAY']:
+        if env_var in os.environ:
+            is_valid = False
+            # Check for actual process activity before trusting the environment variable
+            pgrep_patterns = ['labwc', 'wayfire'] if env_var == 'WAYLAND_DISPLAY' else ['Xorg', 'X']
+            for pattern in pgrep_patterns:
+                if subprocess.run(['pgrep', '-u', str(uid), '-x', pattern], capture_output=True).returncode == 0:
+                    is_valid = True
+                    break
             
-            if pgrep.returncode == 0:
-                runtime_dir = os.environ.get('XDG_RUNTIME_DIR')
-                
-                # Check current user's runtime dir
-                if os.path.exists(os.path.join(runtime_dir, 'wayland-0')):
-                    os.environ['WAYLAND_DISPLAY'] = 'wayland-0'
-                elif os.path.exists(os.path.join(runtime_dir, 'wayland-1')):
-                    os.environ['WAYLAND_DISPLAY'] = 'wayland-1'
-                elif os.getuid() == 0:
-                    # If root, failover to search for common user 1000's session
-                    if os.path.exists('/run/user/1000/wayland-0'):
-                        os.environ['XDG_RUNTIME_DIR'] = '/run/user/1000'
-                        os.environ['WAYLAND_DISPLAY'] = 'wayland-0'
-                        logging.info("Root user using session for UID 1000")
-                
-                if 'WAYLAND_DISPLAY' in os.environ:
-                    logging.info(f"Auto-detected Wayland environment: {os.environ['WAYLAND_DISPLAY']} in {os.environ['XDG_RUNTIME_DIR']}")
-            elif os.path.exists('/tmp/.X11-unix/X0'):
-                os.environ['DISPLAY'] = ':0'
-                logging.info("Auto-detected X11 environment: :0")
-        except Exception as e:
-            logging.error(f"Environment detection helper failed: {e}")
+            if not is_valid:
+                logging.debug(f"Cleaning stale {env_var}: {os.environ[env_var]}")
+                del os.environ[env_var]
+                # Clear session cache if the environment changed
+                _working_methods['session'] = None
+
+    # 2. Force default XDG_RUNTIME_DIR if missing (critical for Wayland)
+    if 'XDG_RUNTIME_DIR' not in os.environ:
+        os.environ['XDG_RUNTIME_DIR'] = f"/run/user/{uid}"
+
+    # 3. Auto-detection: Search for running sessions if none are set
+    if 'WAYLAND_DISPLAY' not in os.environ and 'DISPLAY' not in os.environ:
+        runtime_dir = os.environ['XDG_RUNTIME_DIR']
+        # Check standard Wayland sockets
+        for i in range(2):
+            if os.path.exists(os.path.join(runtime_dir, f'wayland-{i}')):
+                os.environ['WAYLAND_DISPLAY'] = f'wayland-{i}'
+                logging.info(f"Auto-detected Wayland: {os.environ['WAYLAND_DISPLAY']}")
+                return
+        
+        # Check standard X11 socket
+        if os.path.exists('/tmp/.X11-unix/X0'):
+            os.environ['DISPLAY'] = ':0'
+            logging.info("Auto-detected X11: :0")
+
+def _get_hdmi_output_name():
+    # Cache the output name to avoid calling wlr-randr every time
+    if getattr(_get_hdmi_output_name, 'cached', None):
+        return _get_hdmi_output_name.cached
+        
+    try:
+        # Avoid hanging if wlr-randr isn't available or compositor isn't responding
+        output = subprocess.check_output(['wlr-randr'], stderr=subprocess.DEVNULL, timeout=1.5).decode()
+        for line in output.split('\n'):
+            if 'HDMI' in line and (line.strip() and not line.startswith(' ')):
+                name = line.split(' ')[0]
+                _get_hdmi_output_name.cached = name
+                return name
+    except Exception:
+        pass
+    return "HDMI-A-1" # Raspberry Pi standard fallback
 
 def set_display_power(state: bool):
-    try:
-        setup_display_env()
-        
-        # Auto-detect HDMI output for wlr-randr
-        output_name = "HDMI-A-1" # Default fallback
+    """Sets display power using discovered strategies, optimizing for speed and reliability."""
+    global _working_methods
+    target = "ON" if state else "OFF"
+    setup_display_env()
+    output_name = _get_hdmi_output_name()
+    
+    # Strategy Definitions
+    session_strategies = [
+        ("Wayland (wlr-randr)", 
+         ['wlr-randr', '--output', output_name, '--on' if state else '--off'], 
+         lambda: 'WAYLAND_DISPLAY' in os.environ),
+        ("X11 (xset)", 
+         ['xset', 'dpms', 'force', 'on' if state else 'off'], 
+         lambda: 'DISPLAY' in os.environ)
+    ]
+    
+    hardware_strategies = [
+        ("Legacy (vcgencmd)", 
+         ['vcgencmd', 'display_power', '1' if state else '0'], 
+         lambda: True),
+        ("FB Blanking", 
+         ['sudo', 'sh', '-c', f'echo {"0" if state else "1"} > /sys/class/graphics/fb0/blank'], 
+         lambda: os.path.exists('/sys/class/graphics/fb0/blank'))
+    ]
+
+    def run_strategy(name, cmd):
         try:
-            # Try to find the connected HDMI output
-            wlr_output = subprocess.check_output(['wlr-randr'], stderr=subprocess.DEVNULL).decode()
-            for line in wlr_output.split('\n'):
-                if 'HDMI' in line and ' ' in line:
-                    output_name = line.split(' ')[0]
-                    break
-            logging.info(f"Detected HDMI output: {output_name}")
+            res = subprocess.run(cmd, capture_output=True, text=True, timeout=3)
+            return res.returncode == 0
         except Exception:
-            logging.warning(f"Could not auto-detect HDMI output using wlr-randr, using fallback: {output_name}")
+            return False
 
-        success = False
-        method_results = []
-        
-        target = "ON" if state else "OFF"
-        logging.info(f"Attempting to set display power to {target}...")
-
-        if state:
-            # 1. Wayland method (preferred)
-            if os.environ.get('WAYLAND_DISPLAY'):
-                res = subprocess.run(['wlr-randr', '--output', output_name, '--on'], capture_output=True, text=True)
-                method_results.append(f"Wayland (wlr-randr): {res.returncode} (err: {res.stderr.strip()})")
-                if res.returncode == 0:
-                    success = True
-            
-            # 2. Legacy method
-            res = subprocess.run(['vcgencmd', 'display_power', '1'], capture_output=True, text=True)
-            method_results.append(f"Legacy (vcgencmd): {res.returncode} (err: {res.stderr.strip()})")
-            if res.returncode == 0:
-                success = True
-            
-            # 3. DPMS method
-            if os.environ.get('DISPLAY'):
-                res = subprocess.run(['xset', 'dpms', 'force', 'on'], capture_output=True, text=True)
-                method_results.append(f"X11 (xset): {res.returncode} (err: {res.stderr.strip()})")
-                if res.returncode == 0:
-                    success = True
-            
-            # 4. Backlight method
-            try:
-                backlight_dirs = [f for f in os.listdir('/sys/class/backlight') if os.path.isdir(os.path.join('/sys/class/backlight', f))]
-                for bl in backlight_dirs:
-                    bl_path = f'/sys/class/backlight/{bl}/bl_power'
-                    res = subprocess.run(['sudo', 'sh', '-c', f'echo 0 > {bl_path}'], capture_output=True, text=True)
-                    method_results.append(f"Backlight ({bl}): {res.returncode}")
-                    if res.returncode == 0:
-                        success = True
-            except Exception as e:
-                method_results.append(f"Backlight check failed: {e}")
-
-            # 5. Framebuffer Blanking (confirmed working for user)
-            if os.path.exists('/sys/class/graphics/fb0/blank'):
-                res = subprocess.run(['sudo', 'sh', '-c', 'echo 0 > /sys/class/graphics/fb0/blank'], capture_output=True, text=True)
-                method_results.append(f"FB Blanking (ON): {res.returncode}")
-                if res.returncode == 0:
-                    success = True
-                
+    success_count = 0
+    
+    # 1. Execute Session Layer
+    if _working_methods['session']:
+        name, cmd_base, _ = next((s for s in session_strategies if s[0] == _working_methods['session']), (None, None, None))
+        if name and run_strategy(name, cmd_base):
+            success_count += 1
+            logging.debug(f" - {name}: Success (cached)")
         else:
-            # 1. Wayland method
-            if os.environ.get('WAYLAND_DISPLAY'):
-                res = subprocess.run(['wlr-randr', '--output', output_name, '--off'], capture_output=True, text=True)
-                method_results.append(f"Wayland (wlr-randr): {res.returncode} (err: {res.stderr.strip()})")
-                if res.returncode == 0:
-                    success = True
-            
-            # 2. Legacy method
-            res = subprocess.run(['vcgencmd', 'display_power', '0'], capture_output=True, text=True)
-            method_results.append(f"Legacy (vcgencmd): {res.returncode} (err: {res.stderr.strip()})")
-            if res.returncode == 0:
-                success = True
-            
-            # 3. DPMS method
-            if os.environ.get('DISPLAY'):
-                res = subprocess.run(['xset', 'dpms', 'force', 'off'], capture_output=True, text=True)
-                method_results.append(f"X11 (xset): {res.returncode} (err: {res.stderr.strip()})")
-                if res.returncode == 0:
-                    success = True
+            _working_methods['session'] = None # Invalidate stale cache
 
-            # 4. Backlight method (direct hardware)
-            try:
-                # Try to turn off all backlights
-                backlight_dirs = [f for f in os.listdir('/sys/class/backlight') if os.path.isdir(os.path.join('/sys/class/backlight', f))]
-                for bl in backlight_dirs:
-                    bl_path = f'/sys/class/backlight/{bl}/bl_power'
-                    # We might need sudo, but let's try direct first
-                    res = subprocess.run(['sudo', 'sh', '-c', f'echo 1 > {bl_path}'], capture_output=True, text=True)
-                    method_results.append(f"Backlight ({bl}): {res.returncode}")
-                    if res.returncode == 0:
-                        success = True
-            except Exception as e:
-                method_results.append(f"Backlight check failed: {e}")
+    if not success_count:
+        # Discovery Phase for Session
+        for name, cmd, condition in session_strategies:
+            if condition() and run_strategy(name, cmd):
+                _working_methods['session'] = name
+                success_count += 1
+                logging.debug(f" - {name}: Discovered and working")
+                break
 
-            # 5. Framebuffer Blanking (confirmed working for user)
-            if os.path.exists('/sys/class/graphics/fb0/blank'):
-                res = subprocess.run(['sudo', 'sh', '-c', 'echo 1 > /sys/class/graphics/fb0/blank'], capture_output=True, text=True)
-                method_results.append(f"FB Blanking (OFF): {res.returncode}")
-                if res.returncode == 0:
-                    success = True
+    # 2. Execute Hardware Layer
+    # We run hardware strategies to ensure persistent blanking/power states
+    if _working_methods['hardware']:
+        for name in _working_methods['hardware']:
+            name_check, cmd, _ = next((s for s in hardware_strategies if s[0] == name), (None, None, None))
+            if name_check and run_strategy(name_check, cmd):
+                success_count += 1
+                logging.debug(f" - {name}: Success (cached)")
+    else:
+        # Discovery Phase for Hardware
+        for name, cmd, condition in hardware_strategies:
+            if condition() and run_strategy(name, cmd):
+                _working_methods['hardware'].append(name)
+                success_count += 1
+                logging.debug(f" - {name}: Discovered and working")
 
-        for result in method_results:
-            logging.info(f" - {result}")
-
-        if success:
-            logging.info(f"Display power successfully set to {target}")
-        else:
-            logging.error(f"FAILED to set display power to {target}. Tried methods: {', '.join(method_results)}")
-    except Exception as e:
-        logging.error(f"Fatal error controlling display power: {e}")
+    if success_count == 0:
+        logging.error(f"Failed to set display power to {target}.")
+    else:
+        logging.info(f"Display set to {target} (Methods: {success_count})")
 
 def stop_current_mode():
     global current_process
@@ -223,6 +194,12 @@ def stop_current_mode():
             except Exception:
                 pass
         current_process = None
+        
+        # Clear specific display environment variables as the session they belonged to is now dead
+        if 'WAYLAND_DISPLAY' in os.environ:
+            del os.environ['WAYLAND_DISPLAY']
+        if 'DISPLAY' in os.environ:
+            del os.environ['DISPLAY']
 
 def get_available_modes():
     modes = ['off']
@@ -252,28 +229,26 @@ def start_mode(mode):
     if mode == current_mode:
         return
     
-    # 1. First attempt at power off while the current session/compositor is still active
-    if mode == 'off':
-        logging.info("Switching to OFF mode. Finalizing display states...")
-        set_display_power(False)
+    logging.info(f"Transitioning to mode: {mode}")
 
-    # 2. Synchronously stop the current mode.
-    # This ensures any DRM/TTY resources are released before starting the next mode.
+    # 1. Stop the current mode first.
+    # This releases DRM master, X11 sockets, and TTY resources.
     stop_current_mode()
     
-    # Small delay for kernel/TTY handshake settling
-    time.sleep(0.5)
+    # Small delay for kernel/TTY/DRM handshake settling
+    time.sleep(0.7)
 
     current_mode = mode
-    modes_dir = os.path.join(os.path.dirname(__file__), 'modes')
     
     if mode == 'off':
-        logging.info("Confirmed OFF state. Forcing low-level power-off.")
+        logging.info("Ensuring display power is OFF.")
         set_display_power(False)
     else:
         # Pre-emptive power ON (so the next mode doesn't start in the dark)
+        # Note: If labwc is about to start, this might use legacy/fb methods, which is fine.
         set_display_power(True)
         
+        modes_dir = os.path.join(os.path.dirname(__file__), 'modes')
         py_script = os.path.join(modes_dir, f'{mode}_mode.py')
         sh_script = os.path.join(modes_dir, f'{mode}_mode.sh')
         
@@ -289,19 +264,14 @@ def start_mode(mode):
             set_display_power(False)
             return
 
-        # 3. Intelligent Session Wrapping:
-        # If no Wayland or X11 display is active, wrap the mode in a dedicated labwc session.
-        # This takes the guess-work out of mode implementation and ensures 100% display coverage.
+        # 2. Intelligent Session Wrapping:
         setup_display_env()
         final_cmd = base_cmd
         
         if not os.environ.get('WAYLAND_DISPLAY') and not os.environ.get('DISPLAY'):
             try:
-                # Check if labwc is available on the system path
                 subprocess.check_call(['which', 'labwc'], stdout=subprocess.DEVNULL)
                 config_dir = _get_labwc_config()
-                # Use --session-command to run the mode as the primary display consumer
-                # This ensures the screen remains blank/off when the mode exits.
                 cmd_str = ' '.join(base_cmd)
                 final_cmd = ['labwc', '-c', config_dir, '-s', cmd_str]
                 logging.info(f"Wrapping mode '{mode}' in a managed Wayland session (labwc).")
@@ -376,61 +346,71 @@ def on_message(client, userdata, msg):
     else:
         logging.warning(f"Invalid payload '{payload}'. Available modes: {available_modes}")
 
+def signal_handler(sig, frame):
+    logging.info(f"Signal {sig} received. Shutting down orchestrator...")
+    stop_current_mode()
+    sys.exit(0)
+
 if __name__ == '__main__':
     # Parse command line arguments
     import argparse
     parser = argparse.ArgumentParser(description='SmartFrame Orchestrator')
-    parser.add_argument('--debug', action='store_true', help='Enable debug mode with full logs')
+    parser.add_argument('--debug', action='store_true', help='Enable debug mode')
     args = parser.parse_args()
 
     if args.debug:
         DEBUG_MODE = True
         os.environ['SMARTFRAME_DEBUG'] = '1'
         logging.getLogger().setLevel(logging.DEBUG)
-        logging.debug("CLI DEBUG FLAG DETECTED: Full subprocess output enabled.")
+        logging.debug("CLI DEBUG FLAG DETECTED: Full process logs enabled.")
+
+    # Register handlers for clean exit
+    signal.signal(signal.SIGINT, signal_handler)
+    signal.signal(signal.SIGTERM, signal_handler)
 
     mqtt_client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
     if MQTT_USER and MQTT_USER != "[MQTT_USERNAME]":
         mqtt_client.username_pw_set(MQTT_USER, MQTT_PASS)
 
     mqtt_client.will_set(MQTT_STATUS_TOPIC, "offline", retain=True)
-    
     mqtt_client.on_connect = on_connect
     mqtt_client.on_message = on_message
 
-    # Ensure i2c-dev is loaded for ddcutil support in the future
+    # Ensure kernel modules (optional but helpful for future I2C/DDC support)
     try:
-        subprocess.run(['sudo', 'modprobe', 'i2c-dev'], capture_output=True)
+        subprocess.run(['sudo', 'modprobe', 'i2c-dev'], 
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     except Exception:
         pass
 
-    logging.info("SmartFrame orchestrator starting...")
+    logging.info("--- SmartFrame Orchestrator starting ---")
+    
+    # 1. Initial State: Screen off until a mode starts
     set_display_power(False)
+
+    # 2. Connect to MQTT with automatic retry
     try:
-        # Prevent connection error if default IP has not been replaced yet
         if MQTT_BROKER != "[MQTT_SERVER_IP_ADDRESS]":
+            # Set shorter keepalive and infinite reconnection delay (managed by loop_forever)
             mqtt_client.connect(MQTT_BROKER, MQTT_PORT, 60)
         else:
-            logging.warning("MQTT broker IP not configured. Starting offline mode.")
+            logging.warning("MQTT broker IP not configured. Starting in OFFLINE mode.")
     except Exception as e:
-        logging.error(f"Error connecting to MQTT broker: {e}")
+        logging.error(f"Error connecting to MQTT broker: {e}. Orchestrator will retry in background.")
 
-    # Start with the default mode
-    default_mode = config.get('default_mode')
-    if default_mode:
-        start_mode(default_mode)
-    else:
-        start_mode('off') # Fallback to off
+    # 3. Start default mode from config
+    default_mode = config.get('default_mode', 'off')
+    start_mode(default_mode)
 
     try:
         if MQTT_BROKER != "[MQTT_SERVER_IP_ADDRESS]":
+            # loop_forever handles automatic reconnections and persists the process
             mqtt_client.loop_forever()
-            logging.warning("MQTT loop exited. Falling back to offline mode.")
-            
-        # Keeps the main thread alive in offline mode or if loop_forever exits
-        while True:
-            time.sleep(1)
+        else:
+            # Keeps the main thread alive in offline mode
+            while True:
+                time.sleep(1)
     except KeyboardInterrupt:
-        logging.info("Shutting down...")
+        pass
     finally:
         stop_current_mode()
