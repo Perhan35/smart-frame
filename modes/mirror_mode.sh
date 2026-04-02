@@ -21,6 +21,7 @@ echo "Connecting to MagicMirror on: $MIRROR_URL"
 
 # Suppress X11 keyboard warnings (clipping keycodes) which are noisy on Wayland/XWayland
 export XKB_LOG_LEVEL=0
+export XCURSOR_SIZE=0
 
 # Support running from SSH or systemd by auto-detecting display environment
 if [ -z "$DISPLAY" ] && [ -z "$WAYLAND_DISPLAY" ]; then
@@ -85,6 +86,11 @@ else
     export WPE_BACKEND=fdo
     export COG_PLATFORM=fdo
     export COG_PLATFORM_FDO_VIEW_FULLSCREEN=1
+    export GDK_BACKEND=wayland
+    # Create isolated folders for each session to prevent GLib-GObject critical errors
+    export XDG_DATA_HOME="/tmp/cog-data-$USER-$RANDOM"
+    export XDG_CACHE_HOME="/tmp/cog-cache-$USER-$RANDOM"
+    mkdir -p "$XDG_DATA_HOME" "$XDG_CACHE_HOME"
     # On some Pi versions, this helps with GL/EGL initialization
     export WPE_G_P_R_S_M_ALLOW_FORCE_GL=1
     FULL_CMD="$BROWSER_CMD"
@@ -105,6 +111,10 @@ fi
 # Standardizing for Wayland (preferred on Debian Trixie)
 if [ -n "$WAYLAND_DISPLAY" ]; then
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] Using Wayland display: $WAYLAND_DISPLAY"
+    # Show output of wlr-randr for resolution investigation
+    if command -v wlr-randr &> /dev/null; then
+        echo "[$(date '+%Y-%m-%d %H:%M:%S')] Display Info: $(wlr-randr | grep -m 1 'res' | xargs)"
+    fi
     if [ "$SMARTFRAME_DEBUG" = "1" ]; then
         if [ "$BROWSER_TYPE" = "cog" ]; then
             echo "[$(date '+%Y-%m-%d %H:%M:%S')] Starting Cog (Debug) with URL: $MIRROR_URL"
@@ -170,8 +180,8 @@ else
     exit 1
 fi
 
-# Cleanup browser and unclutter on exit
-trap 'echo "Cleaning up..."; kill $PID 2>/dev/null; wait $PID 2>/dev/null; kill $UNCLUTTER_PID 2>/dev/null; rm -rf $LABWC_CONFIG_DIR' EXIT
+# Cleanup browser, isolated dirs, and unclutter on exit
+trap 'echo "Cleaning up..."; kill $PID 2>/dev/null; wait $PID 2>/dev/null; kill $UNCLUTTER_PID 2>/dev/null; rm -rf $LABWC_CONFIG_DIR $XDG_DATA_HOME $XDG_CACHE_HOME' EXIT
 
 # Wait for Chromium to be killed by the parent Python script
 wait $PID

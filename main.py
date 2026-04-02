@@ -242,10 +242,28 @@ def get_available_modes():
 def _get_labwc_config():
     """Create a temporary labwc config to hide the cursor and optimize for kiosk mode."""
     config_dir = subprocess.check_output(['mktemp', '-d', '/tmp/labwc-orchestrator-XXXXXX']).decode().strip()
-    os.makedirs(os.path.join(config_dir, 'labwc'), exist_ok=True)
-    rc_xml = os.path.join(config_dir, 'labwc', 'rc.xml')
+    rc_xml = os.path.join(config_dir, 'rc.xml')
     with open(rc_xml, 'w') as f:
-        f.write('<?xml version="1.0" encoding="UTF-8"?>\n<labwc_config>\n  <core>\n    <cursor>\n      <timeout>1</timeout>\n    </cursor>\n  </core>\n</labwc_config>')
+        f.write('<labwc_config>\n'
+                '  <core>\n'
+                '    <cursor>\n'
+                '      <timeout>1</timeout>\n'
+                '    </cursor>\n'
+                '  </core>\n'
+                '  <windowRules>\n'
+                '    <windowRule identifier="*cog*">\n'
+                '      <action name="Maximize" />\n'
+                '      <action name="Fullscreen" />\n'
+                '    </windowRule>\n'
+                '    <windowRule identifier="*chromium*">\n'
+                '      <action name="Maximize" />\n'
+                '      <action name="Fullscreen" />\n'
+                '    </windowRule>\n'
+                '    <windowRule identifier="*">\n'
+                '      <action name="Maximize" />\n'
+                '    </windowRule>\n'
+                '  </windowRules>\n'
+                '</labwc_config>')
     return config_dir
 
 def start_mode(mode):
@@ -263,7 +281,7 @@ def start_mode(mode):
     stop_current_mode()
     
     # Small delay for kernel/TTY/DRM handshake settling
-    time.sleep(0.7)
+    time.sleep(1.5)
 
     current_mode = mode
     
