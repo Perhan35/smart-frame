@@ -54,22 +54,28 @@ fi
 # Disable the Chromium memory check warning on low-RAM devices (Pi Zero/1GB models)
 export WANT_MEMCHECK=0
 
-# Performance flags for low-memory devices (like Pi Zero)
-FLAGS="--noerrdialogs --disable-infobars --kiosk --check-for-update-interval=31536000 --disable-dev-shm-usage --no-memcheck --enable-low-end-device-mode --disable-site-isolation-trials"
+# Performance and suppression flags for low-memory devices (like Pi Zero)
+# --test-type: suppresses "unsupported flag" warnings
+# --disable-features=...: removes unnecessary background services like Translate, GCM (Google Cloud Messaging), and Media Router
+# --no-pings: stops the registration attempts we see in logs
+# --user-data-dir: uses a transient profile to avoid "profile in use" locks
+# --disable-gpu: forces software rendering (more stable on Pi Zero and silences EGL errors)
+# &> /dev/null: silences all terminal noise from the browser itself
+FLAGS="--noerrdialogs --disable-infobars --kiosk --check-for-update-interval=31536000 --disable-dev-shm-usage --no-memcheck --enable-low-end-device-mode --disable-site-isolation-trials --test-type --no-pings --disable-notifications --disable-sync --disable-features=Translate,OptimizationHints,MediaRouter,DialMediaRouteProvider,PrintPreview --disable-gpu --user-data-dir=/tmp/chromium_mirror"
 
 # Standardizing for Wayland (preferred on Debian Trixie)
 if [ -n "$WAYLAND_DISPLAY" ]; then
-    $CHROMIUM_CMD $FLAGS --ozone-platform=wayland "$MIRROR_URL" &
+    $CHROMIUM_CMD $FLAGS --ozone-platform=wayland "$MIRROR_URL" &> /dev/null &
     PID=$!
 elif [ -n "$DISPLAY" ]; then
-    $CHROMIUM_CMD $FLAGS "$MIRROR_URL" &
+    $CHROMIUM_CMD $FLAGS "$MIRROR_URL" &> /dev/null &
     PID=$!
 elif command -v labwc &> /dev/null; then
     # No display found, use labwc to launch chromium on the physical screen (KMS)
     echo "No desktop session found. Launching via labwc (Wayland KMS)..."
     export XDG_RUNTIME_DIR="/run/user/$(id -u)"
     # Labwc will run then exit when Chromium finishes
-    labwc -s "$CHROMIUM_CMD $FLAGS --ozone-platform=wayland $MIRROR_URL" &
+    labwc -s "$CHROMIUM_CMD $FLAGS --ozone-platform=wayland $MIRROR_URL" &> /dev/null &
     PID=$!
 else
     echo "Error: No Wayland/X11 display found and labwc is not installed."
