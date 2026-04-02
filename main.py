@@ -122,6 +122,13 @@ def set_display_power(state: bool):
                         success = True
             except Exception as e:
                 method_results.append(f"Backlight check failed: {e}")
+
+            # 5. Framebuffer Blanking (confirmed working for user)
+            if os.path.exists('/sys/class/graphics/fb0/blank'):
+                res = subprocess.run(['sudo', 'sh', '-c', 'echo 0 > /sys/class/graphics/fb0/blank'], capture_output=True, text=True)
+                method_results.append(f"FB Blanking (ON): {res.returncode}")
+                if res.returncode == 0:
+                    success = True
                 
         else:
             # 1. Wayland method
@@ -157,6 +164,13 @@ def set_display_power(state: bool):
                         success = True
             except Exception as e:
                 method_results.append(f"Backlight check failed: {e}")
+
+            # 5. Framebuffer Blanking (confirmed working for user)
+            if os.path.exists('/sys/class/graphics/fb0/blank'):
+                res = subprocess.run(['sudo', 'sh', '-c', 'echo 1 > /sys/class/graphics/fb0/blank'], capture_output=True, text=True)
+                method_results.append(f"FB Blanking (OFF): {res.returncode}")
+                if res.returncode == 0:
+                    success = True
 
         for result in method_results:
             logging.info(f" - {result}")
@@ -307,6 +321,12 @@ if __name__ == '__main__':
     
     mqtt_client.on_connect = on_connect
     mqtt_client.on_message = on_message
+
+    # Ensure i2c-dev is loaded for ddcutil support in the future
+    try:
+        subprocess.run(['sudo', 'modprobe', 'i2c-dev'], capture_output=True)
+    except Exception:
+        pass
 
     logging.info("SmartFrame orchestrator starting...")
     set_display_power(False)
