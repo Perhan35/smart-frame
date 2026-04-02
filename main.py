@@ -242,23 +242,12 @@ def get_available_modes():
 def _get_labwc_config():
     """Create a temporary labwc config to hide the cursor and optimize for kiosk mode."""
     config_dir = subprocess.check_output(['mktemp', '-d', '/tmp/labwc-orchestrator-XXXXXX']).decode().strip()
-    rc_xml = os.path.join(config_dir, 'rc.xml')
+    # Using XDG_CONFIG_HOME expects a /labwc subfolder
+    os.makedirs(os.path.join(config_dir, 'labwc'), exist_ok=True)
+    rc_xml = os.path.join(config_dir, 'labwc', 'rc.xml')
     with open(rc_xml, 'w') as f:
         f.write('<labwc_config>\n'
-                '  <core>\n'
-                '    <cursor>\n'
-                '      <timeout>1</timeout>\n'
-                '    </cursor>\n'
-                '  </core>\n'
                 '  <windowRules>\n'
-                '    <windowRule identifier="*cog*">\n'
-                '      <action name="Maximize" />\n'
-                '      <action name="Fullscreen" />\n'
-                '    </windowRule>\n'
-                '    <windowRule identifier="*chromium*">\n'
-                '      <action name="Maximize" />\n'
-                '      <action name="Fullscreen" />\n'
-                '    </windowRule>\n'
                 '    <windowRule identifier="*">\n'
                 '      <action name="Maximize" />\n'
                 '    </windowRule>\n'
@@ -319,8 +308,13 @@ def start_mode(mode):
                 global labwc_config_dir
                 labwc_config_dir = _get_labwc_config()
                 cmd_str = ' '.join(base_cmd)
-                final_cmd = ['labwc', '-c', labwc_config_dir, '-s', cmd_str]
-                logging.info(f"Wrapping mode '{mode}' in a managed Wayland session (labwc).")
+                # Use XDG_CONFIG_HOME for robust config isolation across all labwc versions
+                env = os.environ.copy()
+                env['XDG_CONFIG_HOME'] = labwc_config_dir
+                final_cmd = ['labwc', '-s', cmd_str]
+                logging.info(f"Wrapping mode '{mode}' in a managed Wayland session (labwc) with isolated XDG_CONFIG_HOME.")
+                current_process = subprocess.Popen(final_cmd, env=env, start_new_session=True, stdout=None, stderr=None)
+                return
             except Exception as e:
                 logging.warning(f"labwc session wrapping failed ({e}). Attempting direct launch.")
 

@@ -55,18 +55,18 @@ if [ -n "$DISPLAY" ] && [ -z "$WAYLAND_DISPLAY" ]; then
     xset -dpms 2>/dev/null || true
 fi
 
-# Browser selection: Prefer Cog (ultra-lightweight WPE) then Chromium
-if command -v cog &> /dev/null; then
-    BROWSER_TYPE="cog"
-    BROWSER_CMD="cog --bg-color=black"
-elif command -v chromium-browser &> /dev/null; then
+# Browser selection: Prefer Chromium (more robust) then Cog
+if command -v chromium-browser &> /dev/null; then
     BROWSER_TYPE="chromium"
     BROWSER_CMD="chromium-browser"
 elif command -v chromium &> /dev/null; then
     BROWSER_TYPE="chromium"
     BROWSER_CMD="chromium"
+elif command -v cog &> /dev/null; then
+    BROWSER_TYPE="cog"
+    BROWSER_CMD="cog --bg-color=black"
 else
-    echo "Error: neither cog nor chromium found."
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] Error: neither chromium nor cog found."
     sleep 5
     exit 1
 fi
@@ -118,10 +118,12 @@ if [ -n "$WAYLAND_DISPLAY" ]; then
     if [ "$SMARTFRAME_DEBUG" = "1" ]; then
         if [ "$BROWSER_TYPE" = "cog" ]; then
             echo "[$(date '+%Y-%m-%d %H:%M:%S')] Starting Cog (Debug) with URL: $MIRROR_URL"
-            $FULL_CMD "$MIRROR_URL" 2>&1 | tee /tmp/cog_error.log &
+            WAYLAND_DEBUG=1 $FULL_CMD "$MIRROR_URL" &
+            PID=$!
         else
             echo "[$(date '+%Y-%m-%d %H:%M:%S')] Starting Chromium (Debug Mode) with URL: $MIRROR_URL"
             $FULL_CMD --ozone-platform=wayland "$MIRROR_URL" &
+            PID=$!
         fi
     else
         if [ "$BROWSER_TYPE" = "cog" ]; then
@@ -136,10 +138,11 @@ elif [ -n "$DISPLAY" ] && [ "$BROWSER_TYPE" = "chromium" ]; then
     echo "Using X11 display: $DISPLAY"
     if [ "$SMARTFRAME_DEBUG" = "1" ]; then
         $FULL_CMD "$MIRROR_URL" &
+        PID=$!
     else
         $FULL_CMD "$MIRROR_URL" &> /dev/null &
+        PID=$!
     fi
-    PID=$!
 elif command -v labwc &> /dev/null; then
     # No display found, use labwc to launch the browser on the physical screen (KMS)
     echo "No desktop session found. Launching via labwc (Wayland KMS)..."
