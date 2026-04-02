@@ -16,7 +16,14 @@ sudo apt install -y python3-venv python3-dev portaudio19-dev libsdl2-dev \
 
 # Add user to required groups for hardware access (KMS, Audio, Seat management)
 echo "== Configuring user permissions... =="
-sudo usermod -a -G video,render,seat $USER
+for grp in video render seat; do
+    if getent group $grp >/dev/null; then
+        echo "Adding $USER to $grp group..."
+        sudo usermod -a -G $grp $USER
+    else
+        echo "Group $grp does not exist, skipping."
+    fi
+done
 
 # Create virtual environment
 if [ ! -d ".venv" ]; then
