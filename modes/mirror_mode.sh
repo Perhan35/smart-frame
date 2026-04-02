@@ -2,7 +2,7 @@
 # Mirror Mode
 # Launcher script for Chromium in Kiosk mode to display the MagicMirror
 
-echo "Starting Magic Mirror Mode..."
+echo "[$(date '+%Y-%m-%d %H:%M:%S')] Starting Magic Mirror Mode..."
 
 # Find the URL value in config.yaml (from the parent directory)
 DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )"
@@ -57,7 +57,7 @@ fi
 # Browser selection: Prefer Cog (ultra-lightweight WPE) then Chromium
 if command -v cog &> /dev/null; then
     BROWSER_TYPE="cog"
-    BROWSER_CMD="cog -f --bg-color=black"
+    BROWSER_CMD="cog --bg-color=black"
 elif command -v chromium-browser &> /dev/null; then
     BROWSER_TYPE="chromium"
     BROWSER_CMD="chromium-browser"
@@ -70,7 +70,7 @@ else
     exit 1
 fi
 
-echo "Browser selected: $BROWSER_TYPE"
+echo "[$(date '+%Y-%m-%d %H:%M:%S')] Browser selected: $BROWSER_TYPE"
 
 # Performance and suppression flags for Chromium (only applied if using Chromium)
 if [ "$BROWSER_TYPE" = "chromium" ]; then
@@ -104,19 +104,22 @@ fi
 
 # Standardizing for Wayland (preferred on Debian Trixie)
 if [ -n "$WAYLAND_DISPLAY" ]; then
-    echo "Using Wayland display: $WAYLAND_DISPLAY"
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] Using Wayland display: $WAYLAND_DISPLAY"
     if [ "$SMARTFRAME_DEBUG" = "1" ]; then
-        # In debug mode, let outputs flow directly to the terminal
         if [ "$BROWSER_TYPE" = "cog" ]; then
-            $FULL_CMD "$MIRROR_URL" &
+            echo "[$(date '+%Y-%m-%d %H:%M:%S')] Starting Cog (Debug) with URL: $MIRROR_URL"
+            $FULL_CMD "$MIRROR_URL" 2>&1 | tee /tmp/cog_error.log &
         else
+            echo "[$(date '+%Y-%m-%d %H:%M:%S')] Starting Chromium (Debug Mode) with URL: $MIRROR_URL"
             $FULL_CMD --ozone-platform=wayland "$MIRROR_URL" &
         fi
-    elif [ "$BROWSER_TYPE" = "cog" ]; then
-        # Log Cog errors to a file to help debugging since it's failing
-        $FULL_CMD "$MIRROR_URL" 2>/tmp/cog_error.log &
     else
-        $FULL_CMD --ozone-platform=wayland "$MIRROR_URL" &> /dev/null &
+        if [ "$BROWSER_TYPE" = "cog" ]; then
+            # Always log Cog errors as it is currently being debugged
+            $FULL_CMD "$MIRROR_URL" 2>/tmp/cog_error.log &
+        else
+            $FULL_CMD --ozone-platform=wayland "$MIRROR_URL" &> /dev/null &
+        fi
     fi
     PID=$!
 elif [ -n "$DISPLAY" ] && [ "$BROWSER_TYPE" = "chromium" ]; then
@@ -146,6 +149,7 @@ elif command -v labwc &> /dev/null; then
 EOF
 
     if [ "$SMARTFRAME_DEBUG" = "1" ]; then
+        set -x
         # In debug mode, don't hide output from labwc session
         if [ "$BROWSER_TYPE" = "cog" ]; then
             labwc -c "$LABWC_CONFIG_DIR/labwc" -s "$FULL_CMD $MIRROR_URL" &

@@ -43,6 +43,7 @@ MQTT_PASS = mqtt_config.get('password')
 current_process = None
 current_mode = None
 mqtt_client = None
+labwc_config_dir = None
 
 # Discovery cache to avoid repeated slow subprocess calls
 _working_methods = {
@@ -211,6 +212,16 @@ def stop_current_mode():
                 pass
         current_process = None
         
+        # Cleanup temporary config directory if it exists
+        global labwc_config_dir
+        if labwc_config_dir and os.path.exists(labwc_config_dir):
+            import shutil
+            try:
+                shutil.rmtree(labwc_config_dir)
+            except Exception:
+                pass
+            labwc_config_dir = None
+        
         # Clear specific display environment variables as the session they belonged to is now dead
         if 'WAYLAND_DISPLAY' in os.environ:
             del os.environ['WAYLAND_DISPLAY']
@@ -234,7 +245,7 @@ def _get_labwc_config():
     os.makedirs(os.path.join(config_dir, 'labwc'), exist_ok=True)
     rc_xml = os.path.join(config_dir, 'labwc', 'rc.xml')
     with open(rc_xml, 'w') as f:
-        f.write('<labwc_config><core><cursor><timeout>1</timeout></cursor></core></labwc_config>')
+        f.write('<?xml version="1.0" encoding="UTF-8"?>\n<labwc_config>\n  <core>\n    <cursor>\n      <timeout>1</timeout>\n    </cursor>\n  </core>\n</labwc_config>')
     return config_dir
 
 def start_mode(mode):
@@ -287,9 +298,10 @@ def start_mode(mode):
         if not os.environ.get('WAYLAND_DISPLAY') and not os.environ.get('DISPLAY'):
             try:
                 subprocess.check_call(['which', 'labwc'], stdout=subprocess.DEVNULL)
-                config_dir = _get_labwc_config()
+                global labwc_config_dir
+                labwc_config_dir = _get_labwc_config()
                 cmd_str = ' '.join(base_cmd)
-                final_cmd = ['labwc', '-c', config_dir, '-s', cmd_str]
+                final_cmd = ['labwc', '-c', labwc_config_dir, '-s', cmd_str]
                 logging.info(f"Wrapping mode '{mode}' in a managed Wayland session (labwc).")
             except Exception as e:
                 logging.warning(f"labwc session wrapping failed ({e}). Attempting direct launch.")
