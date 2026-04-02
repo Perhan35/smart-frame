@@ -325,7 +325,13 @@ def start_mode(mode):
                 final_cmd = ['labwc', '-s', cmd_str]
                 logging.info(f"Wrapping mode '{mode}' in a managed Wayland session (labwc) with isolated XDG_CONFIG_HOME.")
                 current_process = subprocess.Popen(final_cmd, env=env, start_new_session=True, stdout=None, stderr=None)
+                
+                # Update MQTT state before returning
+                if mqtt_client and current_mode:
+                    mqtt_client.publish(MQTT_STATE_TOPIC, current_mode, retain=True)
+                    logging.info(f"Published state: {current_mode} to {MQTT_STATE_TOPIC}")
                 return
+
             except Exception as e:
                 logging.warning(f"labwc session wrapping failed ({e}). Attempting direct launch.")
 
