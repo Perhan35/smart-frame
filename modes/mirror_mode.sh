@@ -75,12 +75,15 @@ else
 fi
 
 # Run unclutter in the background as a fallback for X11/XWayland cursors
-if command -v unclutter-xfixes &> /dev/null; then
-    unclutter-xfixes --idle 0.1 --fork &
-    UNCLUTTER_PID=$!
-elif command -v unclutter &> /dev/null; then
-    unclutter -idle 0.1 -root &
-    UNCLUTTER_PID=$!
+UNCLUTTER_PID=""
+if [ -n "$DISPLAY" ]; then
+    if command -v unclutter-xfixes &> /dev/null; then
+        unclutter-xfixes --idle 0.1 --fork &
+        UNCLUTTER_PID=$!
+    elif command -v unclutter &> /dev/null; then
+        unclutter -idle 0.1 -root &
+        UNCLUTTER_PID=$!
+    fi
 fi
 
 # Standardizing for Wayland (preferred on Debian Trixie)
