@@ -8,9 +8,6 @@ import paho.mqtt.client as mqtt
 import logging
 import signal
 
-logging.basicConfig(level=logging.INFO)
-os.environ['PYGAME_HIDE_SUPPORT_PROMPT'] = '1'
-
 # Load configuration
 config_path = os.path.join(os.path.dirname(__file__), 'config.yaml')
 if not os.path.exists(config_path):
@@ -18,6 +15,18 @@ if not os.path.exists(config_path):
     sys.exit(1)
 with open(config_path, 'r') as file:
     config = yaml.safe_load(file)
+
+# Configure logging based on debug setting
+DEBUG_MODE = config.get('debug', False)
+logging.basicConfig(
+    level=logging.DEBUG if DEBUG_MODE else logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s'
+)
+if DEBUG_MODE:
+    os.environ['SMARTFRAME_DEBUG'] = '1'
+    logging.debug("DEBUG MODE ENABLED: Subprocess output will be visible.")
+
+os.environ['PYGAME_HIDE_SUPPORT_PROMPT'] = '1'
 
 mqtt_config = config.get('mqtt', {})
 MQTT_BROKER = mqtt_config.get('broker', '[MQTT_SERVER_IP_ADDRESS]')
@@ -36,34 +45,52 @@ mqtt_client = None
 
 def setup_display_env():
     """Detect and set up environment variables for Wayland/X11 access."""
+    # 1. Validate existing environment
+    if 'WAYLAND_DISPLAY' in os.environ:
+        runtime_dir = os.environ.get('XDG_RUNTIME_DIR', f"/run/user/{os.getuid()}")
+        socket_path = os.path.join(runtime_dir, os.environ['WAYLAND_DISPLAY'])
+        if not os.path.exists(socket_path):
+            logging.debug(f"Invalid WAYLAND_DISPLAY '{os.environ['WAYLAND_DISPLAY']}' (no socket at {socket_path}). Clearing.")
+            del os.environ['WAYLAND_DISPLAY']
+
+    if 'DISPLAY' in os.environ:
+        x_socket = f"/tmp/.X11-unix/X{os.environ['DISPLAY'].replace(':', '')}"
+        if not os.path.exists(x_socket):
+            logging.debug(f"Invalid DISPLAY '{os.environ['DISPLAY']}' (no socket at {x_socket}). Clearing.")
+            del os.environ['DISPLAY']
+
+    # 2. Attempt auto-detection if none found or invalid
     if 'DISPLAY' not in os.environ and 'WAYLAND_DISPLAY' not in os.environ:
         try:
+            # Set default XDG_RUNTIME_DIR if missing
+            if 'XDG_RUNTIME_DIR' not in os.environ:
+                os.environ['XDG_RUNTIME_DIR'] = f"/run/user/{os.getuid()}"
+
             # Check for common Wayland compositors on Raspberry Pi
             pgrep = subprocess.run(['pgrep', '-x', 'labwc'], capture_output=True)
             if pgrep.returncode != 0:
                 pgrep = subprocess.run(['pgrep', '-x', 'wayfire'], capture_output=True)
             
             if pgrep.returncode == 0:
-                user_id = os.getuid()
-                runtime_dir = f"/run/user/{user_id}"
-                os.environ['XDG_RUNTIME_DIR'] = runtime_dir
-                logging.info(f"XDG_RUNTIME_DIR set to: {runtime_dir}")
+                runtime_dir = os.environ.get('XDG_RUNTIME_DIR')
                 
-                # Try wayland-0 then wayland-1
+                # Check current user's runtime dir
                 if os.path.exists(os.path.join(runtime_dir, 'wayland-0')):
                     os.environ['WAYLAND_DISPLAY'] = 'wayland-0'
                 elif os.path.exists(os.path.join(runtime_dir, 'wayland-1')):
                     os.environ['WAYLAND_DISPLAY'] = 'wayland-1'
+                elif os.getuid() == 0:
+                    # If root, failover to search for common user 1000's session
+                    if os.path.exists('/run/user/1000/wayland-0'):
+                        os.environ['XDG_RUNTIME_DIR'] = '/run/user/1000'
+                        os.environ['WAYLAND_DISPLAY'] = 'wayland-0'
+                        logging.info("Root user using session for UID 1000")
                 
                 if 'WAYLAND_DISPLAY' in os.environ:
-                    logging.info(f"Auto-detected Wayland environment: {os.environ['WAYLAND_DISPLAY']}")
-                else:
-                    logging.warning("Detected Wayland-capable manager (labwc/wayfire) but WAYLAND_DISPLAY not found in socket paths.")
+                    logging.info(f"Auto-detected Wayland environment: {os.environ['WAYLAND_DISPLAY']} in {os.environ['XDG_RUNTIME_DIR']}")
             elif os.path.exists('/tmp/.X11-unix/X0'):
                 os.environ['DISPLAY'] = ':0'
                 logging.info("Auto-detected X11 environment: :0")
-            else:
-                logging.warning("No display environment (Wayland/X11) detected.")
         except Exception as e:
             logging.error(f"Environment detection helper failed: {e}")
 
@@ -313,6 +340,18 @@ def on_message(client, userdata, msg):
         logging.warning(f"Invalid payload '{payload}'. Available modes: {available_modes}")
 
 if __name__ == '__main__':
+    # Parse command line arguments
+    import argparse
+    parser = argparse.ArgumentParser(description='SmartFrame Orchestrator')
+    parser.add_argument('--debug', action='store_true', help='Enable debug mode with full logs')
+    args = parser.parse_args()
+
+    if args.debug:
+        DEBUG_MODE = True
+        os.environ['SMARTFRAME_DEBUG'] = '1'
+        logging.getLogger().setLevel(logging.DEBUG)
+        logging.debug("CLI DEBUG FLAG DETECTED: Full subprocess output enabled.")
+
     mqtt_client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
     if MQTT_USER and MQTT_USER != "[MQTT_USERNAME]":
         mqtt_client.username_pw_set(MQTT_USER, MQTT_PASS)

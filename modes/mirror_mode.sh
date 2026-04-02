@@ -24,14 +24,25 @@ export XKB_LOG_LEVEL=0
 
 # Support running from SSH or systemd by auto-detecting display environment
 if [ -z "$DISPLAY" ] && [ -z "$WAYLAND_DISPLAY" ]; then
-    if [ -n "$(pgrep -x labwc)" ] || [ -n "$(pgrep -x wayfire)" ]; then
-        # Default to wayland-0 or wayland-1 which is common on Pi OS Bookworm
-        export WAYLAND_DISPLAY="${WAYLAND_DISPLAY:-wayland-0}"
-        if [ ! -S "$XDG_RUNTIME_DIR/$WAYLAND_DISPLAY" ]; then
-            export WAYLAND_DISPLAY="wayland-1"
-        fi
+    # Try to find a runtime directory
+    if [ -z "$XDG_RUNTIME_DIR" ]; then
         export XDG_RUNTIME_DIR="/run/user/$(id -u)"
-    elif [ -S "/tmp/.X11-unix/X0" ]; then
+    fi
+
+    if [ -n "$(pgrep -x labwc)" ] || [ -n "$(pgrep -x wayfire)" ]; then
+        # Check if wayland-0 or wayland-1 exists in our runtime dir
+        if [ -S "$XDG_RUNTIME_DIR/wayland-0" ]; then
+            export WAYLAND_DISPLAY="wayland-0"
+        elif [ -S "$XDG_RUNTIME_DIR/wayland-1" ]; then
+            export WAYLAND_DISPLAY="wayland-1"
+        elif [ "$(id -u)" -eq 0 ] && [ -S "/run/user/1000/wayland-0" ]; then
+            # If root, try to use user 1000's session
+            export XDG_RUNTIME_DIR="/run/user/1000"
+            export WAYLAND_DISPLAY="wayland-0"
+        fi
+    fi
+
+    if [ -z "$WAYLAND_DISPLAY" ] && [ -S "/tmp/.X11-unix/X0" ]; then
         export DISPLAY=":0"
     fi
 fi
@@ -71,6 +82,11 @@ if [ "$BROWSER_TYPE" = "chromium" ]; then
     FULL_CMD="$BROWSER_CMD $CHROME_FLAGS"
 else
     # Cog specific setup 
+    export WPE_BACKEND=fdo
+    export COG_PLATFORM=fdo
+    export COG_PLATFORM_FDO_VIEW_FULLSCREEN=1
+    # On some Pi versions, this helps with GL/EGL initialization
+    export WPE_G_P_R_S_M_ALLOW_FORCE_GL=1
     FULL_CMD="$BROWSER_CMD"
 fi
 
@@ -88,14 +104,28 @@ fi
 
 # Standardizing for Wayland (preferred on Debian Trixie)
 if [ -n "$WAYLAND_DISPLAY" ]; then
-    if [ "$BROWSER_TYPE" = "cog" ]; then
-        $FULL_CMD "$MIRROR_URL" &> /dev/null &
+    echo "Using Wayland display: $WAYLAND_DISPLAY"
+    if [ "$SMARTFRAME_DEBUG" = "1" ]; then
+        # In debug mode, let outputs flow directly to the terminal
+        if [ "$BROWSER_TYPE" = "cog" ]; then
+            $FULL_CMD "$MIRROR_URL" &
+        else
+            $FULL_CMD --ozone-platform=wayland "$MIRROR_URL" &
+        fi
+    elif [ "$BROWSER_TYPE" = "cog" ]; then
+        # Log Cog errors to a file to help debugging since it's failing
+        $FULL_CMD "$MIRROR_URL" 2>/tmp/cog_error.log &
     else
         $FULL_CMD --ozone-platform=wayland "$MIRROR_URL" &> /dev/null &
     fi
     PID=$!
 elif [ -n "$DISPLAY" ] && [ "$BROWSER_TYPE" = "chromium" ]; then
-    $FULL_CMD "$MIRROR_URL" &> /dev/null &
+    echo "Using X11 display: $DISPLAY"
+    if [ "$SMARTFRAME_DEBUG" = "1" ]; then
+        $FULL_CMD "$MIRROR_URL" &
+    else
+        $FULL_CMD "$MIRROR_URL" &> /dev/null &
+    fi
     PID=$!
 elif command -v labwc &> /dev/null; then
     # No display found, use labwc to launch the browser on the physical screen (KMS)
@@ -115,10 +145,19 @@ elif command -v labwc &> /dev/null; then
 </labwc_config>
 EOF
 
-    if [ "$BROWSER_TYPE" = "cog" ]; then
-        labwc -c "$LABWC_CONFIG_DIR/labwc" -s "$FULL_CMD $MIRROR_URL" &> /dev/null &
+    if [ "$SMARTFRAME_DEBUG" = "1" ]; then
+        # In debug mode, don't hide output from labwc session
+        if [ "$BROWSER_TYPE" = "cog" ]; then
+            labwc -c "$LABWC_CONFIG_DIR/labwc" -s "$FULL_CMD $MIRROR_URL" &
+        else
+            labwc -c "$LABWC_CONFIG_DIR/labwc" -s "$FULL_CMD --ozone-platform=wayland $MIRROR_URL" &
+        fi
     else
-        labwc -c "$LABWC_CONFIG_DIR/labwc" -s "$FULL_CMD --ozone-platform=wayland $MIRROR_URL" &> /dev/null &
+        if [ "$BROWSER_TYPE" = "cog" ]; then
+            labwc -c "$LABWC_CONFIG_DIR/labwc" -s "$FULL_CMD $MIRROR_URL" &> /dev/null &
+        else
+            labwc -c "$LABWC_CONFIG_DIR/labwc" -s "$FULL_CMD --ozone-platform=wayland $MIRROR_URL" &> /dev/null &
+        fi
     fi
     PID=$!
 else

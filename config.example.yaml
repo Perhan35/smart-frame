@@ -9,6 +9,7 @@ mqtt:
   available_modes_topic: "smartframe/modes_available"
   discovery_prefix: "homeassistant"
 
+debug: false # Set to true to see all browser and subprocess output in the terminal
 default_mode: "off" # Possible values: "audio", "mirror", or "off"
 
 magic_mirror:

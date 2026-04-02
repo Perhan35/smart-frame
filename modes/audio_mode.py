@@ -31,6 +31,10 @@ CHANNELS = 1
 @contextmanager
 def ignore_stderr():
     """Context manager to temporarily suppress stderr."""
+    if os.environ.get('SMARTFRAME_DEBUG') == '1':
+        yield # In debug mode, don't suppress anything
+        return
+
     devnull = os.open(os.devnull, os.O_WRONLY)
     old_stderr = os.dup(2)
     sys.stderr.flush()
