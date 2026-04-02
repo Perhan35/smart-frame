@@ -235,6 +235,15 @@ def get_available_modes():
                     modes.append(mode_name)
     return sorted(modes)
 
+def _get_labwc_config():
+    """Create a temporary labwc config to hide the cursor and optimize for kiosk mode."""
+    config_dir = subprocess.check_output(['mktemp', '-d', '/tmp/labwc-orchestrator-XXXXXX']).decode().strip()
+    os.makedirs(os.path.join(config_dir, 'labwc'), exist_ok=True)
+    rc_xml = os.path.join(config_dir, 'labwc', 'rc.xml')
+    with open(rc_xml, 'w') as f:
+        f.write('<labwc_config><core><cursor><timeout>1</timeout></cursor></core></labwc_config>')
+    return config_dir
+
 def start_mode(mode):
     global current_process
     global current_mode
@@ -243,38 +252,66 @@ def start_mode(mode):
     if mode == current_mode:
         return
     
-    # If we are switching TO 'off', turn off screen while the previous environment (like labwc) might still be active
+    # 1. First attempt at power off while the current session/compositor is still active
     if mode == 'off':
-        logging.info("Switching to OFF mode. Turning off display power...")
+        logging.info("Switching to OFF mode. Finalizing display states...")
         set_display_power(False)
 
+    # 2. Synchronously stop the current mode.
+    # This ensures any DRM/TTY resources are released before starting the next mode.
     stop_current_mode()
-    current_mode = mode
     
+    # Small delay for kernel/TTY handshake settling
+    time.sleep(0.5)
+
+    current_mode = mode
     modes_dir = os.path.join(os.path.dirname(__file__), 'modes')
     
     if mode == 'off':
-        # Already handled above
-        pass
+        logging.info("Confirmed OFF state. Forcing low-level power-off.")
+        set_display_power(False)
     else:
+        # Pre-emptive power ON (so the next mode doesn't start in the dark)
+        set_display_power(True)
+        
         py_script = os.path.join(modes_dir, f'{mode}_mode.py')
         sh_script = os.path.join(modes_dir, f'{mode}_mode.sh')
         
-        if os.path.exists(py_script):
-            set_display_power(True)
-            logging.info(f"Starting {mode.capitalize()} Mode (Python)...")
-            current_process = subprocess.Popen([sys.executable, py_script], start_new_session=True)
-        elif os.path.exists(sh_script):
-            set_display_power(True)
-            logging.info(f"Starting {mode.capitalize()} Mode (Bash)...")
-            current_process = subprocess.Popen(['bash', sh_script], start_new_session=True)
+        base_cmd = []
+        if os.path.exists(sh_script):
+            base_cmd = ['bash', sh_script]
+        elif os.path.exists(py_script):
+            base_cmd = [sys.executable, py_script]
         else:
             available = get_available_modes()
             logging.warning(f"Unknown mode: {mode}. Available modes: {available}")
-            current_mode = None
+            current_mode = 'off'
+            set_display_power(False)
             return
 
-    # Publish state update
+        # 3. Intelligent Session Wrapping:
+        # If no Wayland or X11 display is active, wrap the mode in a dedicated labwc session.
+        # This takes the guess-work out of mode implementation and ensures 100% display coverage.
+        setup_display_env()
+        final_cmd = base_cmd
+        
+        if not os.environ.get('WAYLAND_DISPLAY') and not os.environ.get('DISPLAY'):
+            try:
+                # Check if labwc is available on the system path
+                subprocess.check_call(['which', 'labwc'], stdout=subprocess.DEVNULL)
+                config_dir = _get_labwc_config()
+                # Use --session-command to run the mode as the primary display consumer
+                # This ensures the screen remains blank/off when the mode exits.
+                cmd_str = ' '.join(base_cmd)
+                final_cmd = ['labwc', '-c', config_dir, '-s', cmd_str]
+                logging.info(f"Wrapping mode '{mode}' in a managed Wayland session (labwc).")
+            except Exception as e:
+                logging.warning(f"labwc session wrapping failed ({e}). Attempting direct launch.")
+
+        logging.info(f"Executing {mode.capitalize()} mode command: {' '.join(final_cmd)}")
+        current_process = subprocess.Popen(final_cmd, start_new_session=True)
+
+    # 4. Synchronize state with MQTT
     if mqtt_client and current_mode:
         mqtt_client.publish(MQTT_STATE_TOPIC, current_mode, retain=True)
         logging.info(f"Published state: {current_mode} to {MQTT_STATE_TOPIC}")
