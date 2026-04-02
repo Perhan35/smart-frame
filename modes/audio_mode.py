@@ -96,29 +96,62 @@ except OSError:
     except OSError:
         pass
 
-# PyAudio initialization
+# PyAudio initialization and stream configuration
 with ignore_stderr():
     p = pyaudio.PyAudio()
 
 try:
+    # 1. Robust Device Selection
+    device_info = None
+    selected_index = None
+
+    if DEVICE_INDEX is not None and isinstance(DEVICE_INDEX, int):
+        try:
+            device_info = p.get_device_info_by_index(DEVICE_INDEX)
+            selected_index = DEVICE_INDEX
+            print(f"Using configured audio device: {device_info.get('name')} (index {selected_index})")
+        except Exception:
+            print(f"Warning: Configured device index {DEVICE_INDEX} not found, searching for alternatives...")
+
+    if not device_info:
+        try:
+            device_info = p.get_default_input_device_info()
+            selected_index = device_info.get('index')
+            print(f"Using default audio device: {device_info.get('name')} (index {selected_index})")
+        except Exception:
+            print("No default input device found, searching for any available capture device...")
+            for i in range(p.get_device_count()):
+                try:
+                    info = p.get_device_info_by_index(i)
+                    if info.get('maxInputChannels', 0) > 0:
+                        device_info = info
+                        selected_index = i
+                        print(f"Found alternative capture device: {device_info.get('name')} (index {selected_index})")
+                        break
+                except Exception:
+                    continue
+
+    if not device_info or device_info.get('maxInputChannels', 0) == 0:
+        raise RuntimeError("No suitable audio input devices found with capture capabilities.")
+
+    # 2. Dynamic Parameter Configuration
+    # Some devices (like some I2S mappings) only support 2 channels even if the mic is mono.
+    # We favor 1 (mono) but use 2 if required.
+    max_chans = device_info.get('maxInputChannels', 1)
+    CHANNELS = 1 if max_chans == 1 else 2
+    SAMPLE_RATE = int(device_info.get('defaultSampleRate', 48000))
+    
+    print(f"Opening stream: {CHANNELS} channel(s), {SAMPLE_RATE}Hz, index {selected_index}")
+    
     stream_params = {
         'format': FORMAT,
         'channels': CHANNELS,
+        'rate': SAMPLE_RATE,
         'input': True,
+        'input_device_index': selected_index,
         'frames_per_buffer': CHUNK
     }
-    if DEVICE_INDEX is not None and isinstance(DEVICE_INDEX, int):
-        stream_params['input_device_index'] = DEVICE_INDEX
-        device_info = p.get_device_info_by_index(DEVICE_INDEX)
-    else:
-        try:
-            device_info = p.get_default_input_device_info()
-        except IOError:
-            # Fallback if no default input is found
-            device_info = {'defaultSampleRate': 48000}
-            
-    stream_params['rate'] = int(device_info['defaultSampleRate'])
-    
+
     # A-weighting gain pre-calculation
     def get_a_weighting_gains(rate, chunk):
         freqs = np.fft.rfftfreq(chunk, 1.0 / rate)
@@ -131,13 +164,13 @@ try:
         w[0] = 0.0
         return w
         
-    a_gains = get_a_weighting_gains(stream_params['rate'], CHUNK)
-    dt = CHUNK / stream_params['rate']
+    a_gains = get_a_weighting_gains(SAMPLE_RATE, CHUNK)
+    dt = CHUNK / SAMPLE_RATE
     fast_alpha = 1.0 - np.exp(-dt / 0.125) # 125ms FAST integration time
         
     stream = p.open(**stream_params)
 except Exception as e:
-    print(f"Error opening audio stream: {e}")
+    print(f"Fatal error opening audio stream: {e}")
     print("Ensure the INMP441 I2S microphone is properly connected and configured (ALSA/dtoverlay).")
     stream = None
 
@@ -173,8 +206,13 @@ while running:
     
     if stream:
         try:
-            # Read data from the I2S microphone
-            data = np.frombuffer(stream.read(CHUNK, exception_on_overflow=False), dtype=np.int16)
+            # Read data from the microphone
+            raw_data = stream.read(CHUNK, exception_on_overflow=False)
+            data = np.frombuffer(raw_data, dtype=np.int16)
+            
+            # If stereo is used, average the channels to mono for DSP
+            if CHANNELS > 1:
+                data = data.reshape(-1, CHANNELS).mean(axis=1).astype(np.int16)
             
             # Z-weighted (Raw) RMS
             z_rms = np.sqrt(np.mean(data.astype(np.float32)**2))
