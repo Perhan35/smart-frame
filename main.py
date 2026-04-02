@@ -247,12 +247,18 @@ def _get_labwc_config():
     rc_xml = os.path.join(config_dir, 'labwc', 'rc.xml')
     with open(rc_xml, 'w') as f:
         f.write('<labwc_config>\n'
+                '  <core>\n'
+                '    <cursor>\n'
+                '      <timeout>1</timeout>\n'
+                '    </cursor>\n'
+                '  </core>\n'
                 '  <windowRules>\n'
                 '    <windowRule identifier="*">\n'
                 '      <action name="Maximize" />\n'
                 '    </windowRule>\n'
                 '  </windowRules>\n'
                 '</labwc_config>')
+
     return config_dir
 
 def start_mode(mode):
@@ -307,9 +313,14 @@ def start_mode(mode):
                 subprocess.check_call(['which', 'labwc'], stdout=subprocess.DEVNULL)
                 global labwc_config_dir
                 labwc_config_dir = _get_labwc_config()
+                
+                # Faster path: Pass URLs to scripts directly via env vars
+                env = os.environ.copy()
+                if mode == 'mirror':
+                    env['MIRROR_URL'] = config.get('magic_mirror', {}).get('url', 'http://localhost:8080')
+                
                 cmd_str = ' '.join(base_cmd)
                 # Use XDG_CONFIG_HOME for robust config isolation across all labwc versions
-                env = os.environ.copy()
                 env['XDG_CONFIG_HOME'] = labwc_config_dir
                 final_cmd = ['labwc', '-s', cmd_str]
                 logging.info(f"Wrapping mode '{mode}' in a managed Wayland session (labwc) with isolated XDG_CONFIG_HOME.")
@@ -317,6 +328,7 @@ def start_mode(mode):
                 return
             except Exception as e:
                 logging.warning(f"labwc session wrapping failed ({e}). Attempting direct launch.")
+
 
         logging.info(f"Executing {mode.capitalize()} mode command: {' '.join(final_cmd)}")
         current_process = subprocess.Popen(final_cmd, start_new_session=True)
