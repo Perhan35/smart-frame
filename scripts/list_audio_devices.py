@@ -5,37 +5,38 @@ import os
 import sys
 
 def get_devices():
-    p = pyaudio.PyAudio()
-    devices = []
+    # Temporarily redirect stderr to /dev/null to suppress ALSA/JACK errors
+    devnull = os.open(os.devnull, os.O_WRONLY)
+    old_stderr = os.dup(2)
+    sys.stderr.flush()
+    os.dup2(devnull, 2)
+    os.close(devnull)
     
-    # Temporarily suppress ALSA errors so they don't corrupt the curses display
-    import ctypes
-    ERROR_HANDLER_FUNC = ctypes.CFUNCTYPE(None, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p)
-    def py_error_handler(filename, line, function, err, fmt):
-        pass
-    c_error_handler = ERROR_HANDLER_FUNC(py_error_handler)
     try:
-        asound = ctypes.cdll.LoadLibrary('libasound.so.2')
-        asound.snd_lib_error_set_handler(c_error_handler)
-    except OSError:
-        try:
-            asound = ctypes.cdll.LoadLibrary('libasound.so')
-            asound.snd_lib_error_set_handler(c_error_handler)
-        except OSError:
-            pass
+        p = pyaudio.PyAudio()
+        devices = []
+    
+        for i in range(p.get_device_count()):
+            try:
+                dev_info = p.get_device_info_by_index(i)
+                if dev_info.get('maxInputChannels', 0) > 0:
+                    devices.append({
+                        'index': i,
+                        'name': dev_info.get('name'),
+                        'channels': dev_info.get('maxInputChannels')
+                    })
+            except Exception:
+                continue
+    finally:
+        # Restore stderr
+        os.dup2(old_stderr, 2)
+        os.close(old_stderr)
+        
+    try:
+        p.terminate()
+    except Exception:
+        pass
 
-    for i in range(p.get_device_count()):
-        try:
-            dev_info = p.get_device_info_by_index(i)
-            if dev_info.get('maxInputChannels', 0) > 0:
-                devices.append({
-                    'index': i,
-                    'name': dev_info.get('name'),
-                    'channels': dev_info.get('maxInputChannels')
-                })
-        except Exception:
-            continue
-    p.terminate()
     return devices
 
 def menu(stdscr, devices):
@@ -110,7 +111,7 @@ def main():
             update_config(selected_index)
         else:
             print("Selection cancelled. config.yaml was not changed.")
-    except Exception as e:
+    except Exception:
         # Fallback to simple text mode if curses fails
         print("\nAvailable Audio Input Devices:")
         print("null: Default System Device")
