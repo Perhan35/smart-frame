@@ -184,6 +184,7 @@ clock = pygame.time.Clock()
 font_large = pygame.font.Font(None, 160)
 font_medium = pygame.font.Font(None, 80)
 font_small = pygame.font.Font(None, 40)
+font_tiny = pygame.font.Font(None, 25)
 
 last_ui_update_time = time.time()
 last_displayed_dba = 0
@@ -286,13 +287,13 @@ while running:
             screen.blit(dba_text, dba_rect)
             
             # Render dBZ text (Medium)
-            dbz_text = font_medium.render(f"{last_displayed_dbz:.1f} dBZ", True, (200, 200, 200)) # Grey
+            dbz_text = font_medium.render(f"{last_displayed_dbz:.1f} dBZ", True, (180, 210, 180)) # Green-compensated grey
             dbz_rect = dbz_text.get_rect()
             dbz_rect.topright = (screen.get_width() - 50, dba_rect.bottom + 10)
             screen.blit(dbz_text, dbz_rect)
             
-            # Render "FAST" badge (Small)
-            badge_text = font_small.render("FAST RESPONSE", True, (150, 150, 150)) # Light Grey
+            # Render "FAST RESPONSE" indicator (Tiny status info)
+            badge_text = font_tiny.render("FAST RESPONSE", True, (110, 135, 110)) # Compensated subtitle
             badge_rect = badge_text.get_rect()
             badge_rect.topright = (screen.get_width() - 50, dbz_rect.bottom + 10)
             screen.blit(badge_text, badge_rect)
