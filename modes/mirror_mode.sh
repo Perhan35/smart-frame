@@ -51,7 +51,11 @@ else
     exit 1
 fi
 
-FLAGS="--noerrdialogs --disable-infobars --kiosk --check-for-update-interval=31536000 --disable-dev-shm-usage"
+# Disable the Chromium memory check warning on low-RAM devices (Pi Zero/1GB models)
+export WANT_MEMCHECK=0
+
+# Performance flags for low-memory devices (like Pi Zero)
+FLAGS="--noerrdialogs --disable-infobars --kiosk --check-for-update-interval=31536000 --disable-dev-shm-usage --no-memcheck --enable-low-end-device-mode --disable-site-isolation-trials"
 
 # Standardizing for Wayland (preferred on Debian Trixie)
 if [ -n "$WAYLAND_DISPLAY" ]; then
