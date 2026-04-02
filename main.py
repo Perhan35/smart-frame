@@ -8,6 +8,7 @@ import paho.mqtt.client as mqtt
 import logging
 
 logging.basicConfig(level=logging.INFO)
+os.environ['PYGAME_HIDE_SUPPORT_PROMPT'] = '1'
 
 # Load configuration
 config_path = os.path.join(os.path.dirname(__file__), 'config.yaml')
@@ -199,6 +200,7 @@ if __name__ == '__main__':
     mqtt_client.on_message = on_message
 
     logging.info("SmartFrame orchestrator starting...")
+    set_display_power(False)
     try:
         # Prevent connection error if default IP has not been replaced yet
         if MQTT_BROKER != "[MQTT_SERVER_IP_ADDRESS]":
@@ -213,7 +215,7 @@ if __name__ == '__main__':
     if default_mode:
         start_mode(default_mode)
     else:
-        start_mode('mirror') # Fallback to mirror
+        start_mode('off') # Fallback to off
 
     try:
         if MQTT_BROKER != "[MQTT_SERVER_IP_ADDRESS]":

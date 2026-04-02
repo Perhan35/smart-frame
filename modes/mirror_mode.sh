@@ -19,6 +19,9 @@ fi
 
 echo "Connecting to MagicMirror on: $MIRROR_URL"
 
+# Suppress X11 keyboard warnings (clipping keycodes) which are noisy on Wayland/XWayland
+export XKB_LOG_LEVEL=0
+
 # Support running from SSH or systemd by auto-detecting display environment
 if [ -z "$DISPLAY" ] && [ -z "$WAYLAND_DISPLAY" ]; then
     if [ -n "$(pgrep -x labwc)" ] || [ -n "$(pgrep -x wayfire)" ]; then
@@ -40,42 +43,59 @@ if [ -n "$DISPLAY" ] && [ -z "$WAYLAND_DISPLAY" ]; then
     xset -dpms 2>/dev/null || true
 fi
 
-# Launch the task in the foreground or background depending on if we use labwc
-if command -v chromium-browser &> /dev/null; then
-    CHROMIUM_CMD="chromium-browser"
+# Browser selection: Prefer Cog (ultra-lightweight WPE) then Chromium
+if command -v cog &> /dev/null; then
+    BROWSER_TYPE="cog"
+    BROWSER_CMD="cog -f --bg-color=black"
+elif command -v chromium-browser &> /dev/null; then
+    BROWSER_TYPE="chromium"
+    BROWSER_CMD="chromium-browser"
 elif command -v chromium &> /dev/null; then
-    CHROMIUM_CMD="chromium"
+    BROWSER_TYPE="chromium"
+    BROWSER_CMD="chromium"
 else
-    echo "Warning: neither chromium nor chromium-browser not found."
+    echo "Error: neither cog nor chromium found."
     sleep 5
     exit 1
 fi
 
-# Disable the Chromium memory check warning on low-RAM devices (Pi Zero/1GB models)
-export WANT_MEMCHECK=0
+echo "Browser selected: $BROWSER_TYPE"
 
-# Performance and suppression flags for low-memory devices (like Pi Zero)
-# --test-type: suppresses "unsupported flag" warnings
-# --disable-features=...: removes unnecessary background services like Translate, GCM (Google Cloud Messaging), and Media Router
-# --no-pings: stops the registration attempts we see in logs
-# --user-data-dir: uses a transient profile to avoid "profile in use" locks
-# --disable-gpu: forces software rendering (more stable on Pi Zero and silences EGL errors)
-# &> /dev/null: silences all terminal noise from the browser itself
-FLAGS="--noerrdialogs --disable-infobars --kiosk --check-for-update-interval=31536000 --disable-dev-shm-usage --no-memcheck --enable-low-end-device-mode --disable-site-isolation-trials --test-type --no-pings --disable-notifications --disable-sync --disable-features=Translate,OptimizationHints,MediaRouter,DialMediaRouteProvider,PrintPreview --disable-gpu --user-data-dir=/tmp/chromium_mirror"
+# Performance and suppression flags for Chromium (only applied if using Chromium)
+if [ "$BROWSER_TYPE" = "chromium" ]; then
+    # --disable-features:
+    # OnDeviceModel,OptimizationGuideModelExecution: Stops Chromium from trying to load AI models (fixes "on_device_model service disconnect" error)
+    # WebGPU,SkiaGraphite: Disables high-end GPU features that cause warnings on Pi
+    # Translate,OptimizationHints,MediaRouter: Removes unnecessary background services
+    CHROME_FLAGS="--noerrdialogs --disable-infobars --kiosk --check-for-update-interval=31536000 --disable-dev-shm-usage --no-memcheck --enable-low-end-device-mode --disable-site-isolation-trials --test-type --no-pings --disable-notifications --disable-sync --disable-features=Translate,OptimizationHints,MediaRouter,DialMediaRouteProvider,PrintPreview,OnDeviceModel,OptimizationGuideModelExecution,WebGPU,SkiaGraphite --disable-gpu --user-data-dir=/tmp/chromium_mirror"
+    FULL_CMD="$BROWSER_CMD $CHROME_FLAGS"
+else
+    # Cog specific setup 
+    FULL_CMD="$BROWSER_CMD"
+fi
 
 # Standardizing for Wayland (preferred on Debian Trixie)
 if [ -n "$WAYLAND_DISPLAY" ]; then
-    $CHROMIUM_CMD $FLAGS --ozone-platform=wayland "$MIRROR_URL" &> /dev/null &
+    if [ "$BROWSER_TYPE" = "cog" ]; then
+        $FULL_CMD "$MIRROR_URL" &> /dev/null &
+    else
+        $FULL_CMD --ozone-platform=wayland "$MIRROR_URL" &> /dev/null &
+    fi
     PID=$!
-elif [ -n "$DISPLAY" ]; then
-    $CHROMIUM_CMD $FLAGS "$MIRROR_URL" &> /dev/null &
+elif [ -n "$DISPLAY" ] && [ "$BROWSER_TYPE" = "chromium" ]; then
+    $FULL_CMD "$MIRROR_URL" &> /dev/null &
     PID=$!
 elif command -v labwc &> /dev/null; then
-    # No display found, use labwc to launch chromium on the physical screen (KMS)
+    # No display found, use labwc to launch the browser on the physical screen (KMS)
     echo "No desktop session found. Launching via labwc (Wayland KMS)..."
     export XDG_RUNTIME_DIR="/run/user/$(id -u)"
-    # Labwc will run then exit when Chromium finishes
-    labwc -s "$CHROMIUM_CMD $FLAGS --ozone-platform=wayland $MIRROR_URL" &> /dev/null &
+    
+    # Labwc will run then exit when the browser finishes
+    if [ "$BROWSER_TYPE" = "cog" ]; then
+        labwc -s "$FULL_CMD $MIRROR_URL" &> /dev/null &
+    else
+        labwc -s "$FULL_CMD --ozone-platform=wayland $MIRROR_URL" &> /dev/null &
+    fi
     PID=$!
 else
     echo "Error: No Wayland/X11 display found and labwc is not installed."

@@ -119,7 +119,8 @@ running = True
 clock = pygame.time.Clock()
 
 # Use default font, change size
-font = pygame.font.SysFont(None, 64)
+# Using Font(None, ...) instead of SysFont(None, ...) to avoid fc-list timeout on some systems
+font = pygame.font.Font(None, 64)
 
 while running:
     for event in pygame.event.get():
