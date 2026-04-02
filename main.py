@@ -47,6 +47,7 @@ def setup_display_env():
                 user_id = os.getuid()
                 runtime_dir = f"/run/user/{user_id}"
                 os.environ['XDG_RUNTIME_DIR'] = runtime_dir
+                logging.info(f"XDG_RUNTIME_DIR set to: {runtime_dir}")
                 
                 # Try wayland-0 then wayland-1
                 if os.path.exists(os.path.join(runtime_dir, 'wayland-0')):
@@ -56,11 +57,15 @@ def setup_display_env():
                 
                 if 'WAYLAND_DISPLAY' in os.environ:
                     logging.info(f"Auto-detected Wayland environment: {os.environ['WAYLAND_DISPLAY']}")
+                else:
+                    logging.warning("Detected Wayland-capable manager (labwc/wayfire) but WAYLAND_DISPLAY not found in socket paths.")
             elif os.path.exists('/tmp/.X11-unix/X0'):
                 os.environ['DISPLAY'] = ':0'
                 logging.info("Auto-detected X11 environment: :0")
+            else:
+                logging.warning("No display environment (Wayland/X11) detected.")
         except Exception as e:
-            logging.debug(f"Environment detection helper failed: {e}")
+            logging.error(f"Environment detection helper failed: {e}")
 
 def set_display_power(state: bool):
     try:
@@ -75,56 +80,93 @@ def set_display_power(state: bool):
                 if 'HDMI' in line and ' ' in line:
                     output_name = line.split(' ')[0]
                     break
+            logging.info(f"Detected HDMI output: {output_name}")
         except Exception:
-            pass
+            logging.warning(f"Could not auto-detect HDMI output using wlr-randr, using fallback: {output_name}")
 
         success = False
+        method_results = []
+        
+        target = "ON" if state else "OFF"
+        logging.info(f"Attempting to set display power to {target}...")
+
         if state:
             # 1. Wayland method (preferred)
             if os.environ.get('WAYLAND_DISPLAY'):
-                res = subprocess.run(['wlr-randr', '--output', output_name, '--on'], capture_output=True)
+                res = subprocess.run(['wlr-randr', '--output', output_name, '--on'], capture_output=True, text=True)
+                method_results.append(f"Wayland (wlr-randr): {res.returncode} (err: {res.stderr.strip()})")
                 if res.returncode == 0:
                     success = True
             
             # 2. Legacy method
-            res = subprocess.run(['vcgencmd', 'display_power', '1'], capture_output=True)
+            res = subprocess.run(['vcgencmd', 'display_power', '1'], capture_output=True, text=True)
+            method_results.append(f"Legacy (vcgencmd): {res.returncode} (err: {res.stderr.strip()})")
             if res.returncode == 0:
                 success = True
             
             # 3. DPMS method
             if os.environ.get('DISPLAY'):
-                res = subprocess.run(['xset', 'dpms', 'force', 'on'], capture_output=True)
+                res = subprocess.run(['xset', 'dpms', 'force', 'on'], capture_output=True, text=True)
+                method_results.append(f"X11 (xset): {res.returncode} (err: {res.stderr.strip()})")
                 if res.returncode == 0:
                     success = True
+            
+            # 4. Backlight method
+            try:
+                backlight_dirs = [f for f in os.listdir('/sys/class/backlight') if os.path.isdir(os.path.join('/sys/class/backlight', f))]
+                for bl in backlight_dirs:
+                    bl_path = f'/sys/class/backlight/{bl}/bl_power'
+                    res = subprocess.run(['sudo', 'sh', '-c', f'echo 0 > {bl_path}'], capture_output=True, text=True)
+                    method_results.append(f"Backlight ({bl}): {res.returncode}")
+                    if res.returncode == 0:
+                        success = True
+            except Exception as e:
+                method_results.append(f"Backlight check failed: {e}")
                 
-            if success:
-                logging.info(f"Display power set to ON (Output: {output_name})")
-            else:
-                logging.warning(f"Failed to set display power to ON. (Output: {output_name})")
         else:
             # 1. Wayland method
             if os.environ.get('WAYLAND_DISPLAY'):
-                res = subprocess.run(['wlr-randr', '--output', output_name, '--off'], capture_output=True)
+                res = subprocess.run(['wlr-randr', '--output', output_name, '--off'], capture_output=True, text=True)
+                method_results.append(f"Wayland (wlr-randr): {res.returncode} (err: {res.stderr.strip()})")
                 if res.returncode == 0:
                     success = True
             
             # 2. Legacy method
-            res = subprocess.run(['vcgencmd', 'display_power', '0'], capture_output=True)
+            res = subprocess.run(['vcgencmd', 'display_power', '0'], capture_output=True, text=True)
+            method_results.append(f"Legacy (vcgencmd): {res.returncode} (err: {res.stderr.strip()})")
             if res.returncode == 0:
                 success = True
             
             # 3. DPMS method
             if os.environ.get('DISPLAY'):
-                res = subprocess.run(['xset', 'dpms', 'force', 'off'], capture_output=True)
+                res = subprocess.run(['xset', 'dpms', 'force', 'off'], capture_output=True, text=True)
+                method_results.append(f"X11 (xset): {res.returncode} (err: {res.stderr.strip()})")
                 if res.returncode == 0:
                     success = True
 
-            if success:
-                logging.info(f"Display power set to OFF (Output: {output_name})")
-            else:
-                logging.warning(f"Failed to set display power to OFF. (Output: {output_name})")
+            # 4. Backlight method (direct hardware)
+            try:
+                # Try to turn off all backlights
+                backlight_dirs = [f for f in os.listdir('/sys/class/backlight') if os.path.isdir(os.path.join('/sys/class/backlight', f))]
+                for bl in backlight_dirs:
+                    bl_path = f'/sys/class/backlight/{bl}/bl_power'
+                    # We might need sudo, but let's try direct first
+                    res = subprocess.run(['sudo', 'sh', '-c', f'echo 1 > {bl_path}'], capture_output=True, text=True)
+                    method_results.append(f"Backlight ({bl}): {res.returncode}")
+                    if res.returncode == 0:
+                        success = True
+            except Exception as e:
+                method_results.append(f"Backlight check failed: {e}")
+
+        for result in method_results:
+            logging.info(f" - {result}")
+
+        if success:
+            logging.info(f"Display power successfully set to {target}")
+        else:
+            logging.error(f"FAILED to set display power to {target}. Tried methods: {', '.join(method_results)}")
     except Exception as e:
-        logging.error(f"Error controlling display power: {e}")
+        logging.error(f"Fatal error controlling display power: {e}")
 
 def stop_current_mode():
     global current_process
@@ -159,15 +201,20 @@ def start_mode(mode):
     
     if mode == current_mode:
         return
-        
+    
+    # If we are switching TO 'off', turn off screen while the previous environment (like labwc) might still be active
+    if mode == 'off':
+        logging.info("Switching to OFF mode. Turning off display power...")
+        set_display_power(False)
+
     stop_current_mode()
     current_mode = mode
     
     modes_dir = os.path.join(os.path.dirname(__file__), 'modes')
     
     if mode == 'off':
-        logging.info("Switching off screen...")
-        set_display_power(False)
+        # Already handled above
+        pass
     else:
         py_script = os.path.join(modes_dir, f'{mode}_mode.py')
         sh_script = os.path.join(modes_dir, f'{mode}_mode.sh')
