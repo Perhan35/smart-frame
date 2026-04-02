@@ -288,9 +288,9 @@ while running:
 
             # 5. NOISE FLOOR COMPENSATION
             # Aggressive fix for the "34 vs 40" discrepancy in silence.
-            # We fade in a 6dB correction for anything below 45dB.
+            # We fade in an 8dB correction for anything below 45dB.
             if db_a < 45:
-                correction = 6.0 * (1.0 - (max(30, db_a) - 30) / 15)
+                correction = 8.0 * (1.0 - (max(30, db_a) - 30) / 15)
                 db_a -= correction
                 db_z -= correction
 
