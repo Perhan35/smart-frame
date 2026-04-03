@@ -290,10 +290,20 @@ def set_display_power(state: bool):
     def run_strategy(name, cmd):
         try:
             # Short timeout for cached methods, longer for discovery
-            timeout = 1.2 if name in _working_methods['hardware'] else 3.0
+            timeout = 1.5 if name in _working_methods['hardware'] else 3.5
             res = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+            if res.returncode != 0:
+                err = res.stderr.strip()
+                if "bus" in err.lower() and ("busy" in err.lower() or "error" in err.lower()):
+                    logging.debug(f"Display method '{name}' failed (Bus Busy/Error): {err}")
+                else:
+                    logging.debug(f"Display method '{name}' failed with code {res.returncode}: {err}")
             return res.returncode == 0
-        except Exception:
+        except subprocess.TimeoutExpired:
+            logging.debug(f"Display method '{name}' timed out after {timeout}s")
+            return False
+        except Exception as e:
+            logging.debug(f"Display method '{name}' Exception: {e}")
             return False
 
     success_count = 0
@@ -507,7 +517,7 @@ def start_mode(mode):
         mqtt_client.publish(MQTT_STATE_TOPIC, current_mode, retain=True)
     
     # Small delay for kernel/TTY/DRM handshake settling
-    time.sleep(1.5)
+    time.sleep(2.0)
 
     if mode == 'off':
         logging.info("Ensuring display power is OFF.")
@@ -516,6 +526,8 @@ def start_mode(mode):
     else:
         # Pre-emptive power ON (so the next mode doesn't start in the dark)
         set_display_power(True)
+        # Wait for monitor to wake up and DRM/I2C to be ready
+        time.sleep(1.5)
         
         modes_dir = os.path.join(os.path.dirname(__file__), 'modes')
         py_script = os.path.join(modes_dir, f'{mode}_mode.py')
