@@ -81,10 +81,10 @@ if [ "$BROWSER_TYPE" = "cog" ]; then
     #   --enable-page-cache=false  Disable in-memory back/forward cache to save RAM on 512MB device
     COG_FLAGS="--platform=wl --webprocess-failure=restart --bg-color=black --enable-page-cache=false"
 
-    # Conditional logging for debugging
+    # Conditional logging for debugging (route WebKit/WPE messages to stderr)
     if [ "$SMARTFRAME_DEBUG" = "1" ]; then
-        export WEBKIT_INSPECTOR_SERVER=0.0.0.0:9998
-        echo "[$(date '+%Y-%m-%d %H:%M:%S')] WebKit Inspector enabled on port 9998"
+        export G_MESSAGES_DEBUG=all
+        export WEBKIT_DEBUG=Loading,Network,Process
     fi
 
     LAUNCH_WRAPPER="nice -n 0 ionice -c 2 -n 4"
