@@ -57,8 +57,9 @@ if [ "$BROWSER_TYPE" = "chromium" ]; then
     PROFILE_DIR="$DIR/../.chromium_profile"
     CACHE_DIR="$PROFILE_DIR/DiskCache"
     mkdir -p "$PROFILE_DIR" "$CACHE_DIR"
-    # Purge stale GPU cache from prior sessions
-    rm -rf "$PROFILE_DIR/GPUCache" "$PROFILE_DIR/ShaderCache" "$PROFILE_DIR/GrShaderCache" 2>/dev/null
+    # Purge stale GPU cache and corrupted Code Cache from prior sessions
+    rm -rf "$PROFILE_DIR/GPUCache" "$PROFILE_DIR/ShaderCache" "$PROFILE_DIR/GrShaderCache" \
+           "$CACHE_DIR/Default/Code Cache" 2>/dev/null
 
     # Pi Zero 2 WH: vc4 GPU only supports GLES 2.0 but Chromium ANGLE requires GLES 3.0.
     # No hardware GL backend works, so we use CPU-based Skia software rendering (--disable-gpu).
@@ -67,19 +68,25 @@ if [ "$BROWSER_TYPE" = "chromium" ]; then
     # Key flags:
     # --disable-gpu: Skip GPU/ANGLE entirely, use Skia software rasterizer (mandatory for vc4)
     # --disable-gpu-compositing: All compositing on CPU (avoids fallback GL attempts)
-    # --no-sandbox: fix "Failed global descriptor lookup" on Pi kiosk
+    # --no-sandbox: fix sandbox issues on Pi kiosk
     # --disable-dev-shm-usage: Fixes memory issues on low-RAM devices
     # --use-mock-keychain: Avoids D-Bus/Identity/OSCrypt overhead and log spam
     # --disk-cache-dir=$CACHE_DIR: Persistent cache (NOT /tmp which is wiped on reboot)
+    # NetworkServiceInProcess: prevents network service crash from shared memory descriptor
+    #   failures on Pi Zero 2 (avoids "Failed global descriptor lookup" → white screen)
+    # --disable-field-trial-config + --disable-crash-reporter: kill all Google phoning-home
+    #   (variations/field trials, Gaia auth, metrics, crash uploads, Bluetooth scans)
     CHROME_FLAGS="--no-sandbox --noerrdialogs --disable-infobars --kiosk --hide-scrollbars --no-memcheck \
 --password-store=basic --use-mock-keychain --check-for-update-interval=31536000 \
 --enable-low-end-device-mode --disable-site-isolation-trials --test-type --no-pings \
 --disable-notifications --disable-sync --autoplay-policy=no-user-gesture-required \
 --disable-background-networking --disable-component-update --disable-default-apps \
 --disable-domain-reliability --disable-extensions --disable-client-side-phishing-detection \
---no-first-run --no-default-browser-check --disable-breakpad --metrics-recording-only \
---disable-features=Translate,OptimizationHints,MediaRouter,DialMediaRouteProvider,PrintPreview,OnDeviceModel,OptimizationGuideModelExecution,WebGPU,SkiaGraphite,WebRtcHideLocalIpsWithMdns,SafeBrowsing,GCM,OptimizationGuide,EnterpriseDataProtectionAnalysis,AudioServiceOutOfProcess,BackForwardCache,IsolateOrigins,SitePerProcess,Vulkan,BatteryStatus,NetworkQualityEstimator,PrivacySandboxSettings4,FedCm,InterestFeedContentSuggestions,SegmentationPlatform,PushMessaging,CloudMessaging \
---disable-variations-safe-mode --disable-dev-shm-usage \
+--no-first-run --no-default-browser-check --disable-breakpad --disable-crash-reporter \
+--disable-field-trial-config --disable-variations-safe-mode \
+--disable-features=Translate,OptimizationHints,MediaRouter,DialMediaRouteProvider,PrintPreview,OnDeviceModel,OptimizationGuideModelExecution,WebGPU,SkiaGraphite,WebRtcHideLocalIpsWithMdns,SafeBrowsing,GCM,OptimizationGuide,EnterpriseDataProtectionAnalysis,AudioServiceOutOfProcess,BackForwardCache,IsolateOrigins,SitePerProcess,Vulkan,BatteryStatus,NetworkQualityEstimator,PrivacySandboxSettings4,FedCm,InterestFeedContentSuggestions,SegmentationPlatform,PushMessaging,CloudMessaging,Reporting,AutofillServerCommunication,SigninInterception,ChromeBrowserCloudManagement,WebBluetooth,WebBluetoothScanning \
+--enable-features=NetworkServiceInProcess \
+--disable-dev-shm-usage \
 --disable-gpu --disable-gpu-compositing \
 --num-raster-threads=2 --renderer-process-limit=1 \
 --disable-session-crashed-bubble --hide-crash-restore-bubble \
