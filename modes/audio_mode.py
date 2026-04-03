@@ -248,20 +248,20 @@ ema_rms_a = 0.0
 ema_rms_z = 0.0
 
 # --- SPECTRUM ANALYZER CONFIGURATION ---
-NUM_BANDS = 120          # Ultra-high density professional array
+NUM_BANDS = 96           # High density while maintaining distinct bar clarity
 MIN_FREQ = 25
-MAX_FREQ = 24000         # Full Nyquist for 48kHz resolution
-MIN_DB = 48
-MAX_DB = 108
-SMOOTHING_FACTOR = 0.70  # Aggressive energy tracking for 8k buffer
+MAX_FREQ = 24000
+MIN_DB = 52              # Increased floor for near-perfect silence clearing
+MAX_DB = 112             # Substantial headroom for loud music
+SMOOTHING_FACTOR = 0.70  # Aggressive energy tracking
 PEAK_GRAVITY = 0.03
 PEAK_MAX_SPEED = 0.10
-NOISE_GATE_THRESHOLD = 0.02
+NOISE_GATE_THRESHOLD = 0.03 # Deeper gate for cleaner background
 
-# Professional Slope Setting: Lowered slightly for more natural high-end
-SLOPE_DB_PER_OCTAVE = 3.5 
+# Professional Slope Setting: Lowered for more accurate mic profile representation
+SLOPE_DB_PER_OCTAVE = 2.0 
 
-# Frequency Range Definitions (Cleaned up for 20Hz-24kHz)
+# Frequency Range Definitions (Cleaned up for 25Hz-24kHz)
 FREQ_RANGES = [
     {"name": "BASS", "min": 25, "max": 250, "level": 1, "color": (100, 150, 255)},
     {"name": "MIDS", "min": 250, "max": 4000, "level": 1, "color": (150, 255, 150)},
@@ -282,12 +282,16 @@ def get_log_bands(sample_rate, fft_size, num_bands, min_f, max_f):
     safe_min_f = max(1.0, min_f)
     band_edges = np.logspace(np.log10(safe_min_f), np.log10(max_f), num_bands + 1)
     bands = []
-    # Pre-calculate central frequencies for each band for slope calculation
     band_centers = []
     for i in range(num_bands):
         indices = np.where((freqs >= band_edges[i]) & (freqs < band_edges[i+1]))[0]
+        # Robustness: If range is too narrow for this FFT resolution, take the nearest bin
+        if len(indices) == 0:
+            nearest_idx = np.argmin(np.abs(freqs - (band_edges[i] + band_edges[i+1])/2))
+            indices = np.array([nearest_idx])
+            
         bands.append(indices)
-        band_centers.append(np.sqrt(band_edges[i] * band_edges[i+1])) # Geometric mean
+        band_centers.append(np.sqrt(band_edges[i] * band_edges[i+1]))
     return bands, band_edges, band_centers
 
 band_indices, band_edges, band_centers = get_log_bands(SAMPLE_RATE, CHUNK, NUM_BANDS, MIN_FREQ, MAX_FREQ)
@@ -446,20 +450,30 @@ while running:
                 
                 x = start_x + i * (bar_width + bar_spacing)
                 
-                # High-end Spectral Gradient: Each bar is a single color based on its position
-                # Slate Blue (Bass) -> Bright Cyan (Mids) -> Mint White (Treble)
-                r_low, g_low, b_low = 60, 100, 180
-                r_high, g_high, b_high = 160, 255, 230
+                # Professional Spectral Gradient synchronized with UI legends:
+                # BASS (Blue) -> MIDS (Green) -> TREBLE (Orange/Red)
+                f_center = band_centers[i]
                 
-                # Interpolate based on position in the spectrum
-                pos_mix = i / NUM_BANDS
-                r = int(r_low + (r_high - r_low) * pos_mix)
-                g = int(g_low + (g_high - g_low) * pos_mix)
-                b = int(b_low + (b_high - b_low) * pos_mix)
+                if f_center < 250: # Bass Range
+                    color = (100, 150, 255)
+                elif f_center < 4000: # Mids Range
+                    # Linear interpolate between Green and Blue for transition
+                    mix = (f_center - 250) / 3750
+                    r = int(100 + (150 - 100) * mix)
+                    g = int(150 + (255 - 150) * mix)
+                    b = int(255 + (150 - 255) * mix)
+                    color = (r, g, b)
+                else: # Treble Range
+                    # Linear interpolate between Orange and Green
+                    mix = min(1.0, (f_center - 4000) / 16000)
+                    r = int(150 + (255 - 150) * mix)
+                    g = int(255 + (150 - 255) * mix)
+                    b = int(150 + (100 - 150) * mix)
+                    color = (r, g, b)
                 
-                # Intensify color slightly as bar goes higher
-                intensity = 0.8 + 0.2 * bar_heights[i]
-                final_color = (int(r * intensity), int(g * intensity), int(b * intensity))
+                # Height-based brightness boost
+                intensity = 0.7 + 0.3 * bar_heights[i]
+                final_color = (int(color[0] * intensity), int(color[1] * intensity), int(color[2] * intensity))
                 
                 if h > 5:
                     pygame.draw.rect(screen, final_color, (x, analyzer_y_bottom - h, bar_width, h), border_radius=6)
@@ -517,9 +531,9 @@ while running:
             elif last_displayed_dba >= THRESHOLD_WARNING:
                 text_color = (255, 180, 50)  # Vivid Orange
 
-            # Render dBA text (Large)
+            # Render dBA text (Large, Integer only)
             dba_text = font_extra_large.render(
-                f"{last_displayed_dba:.1f} dBA", True, text_color
+                f"{int(round(last_displayed_dba))} dBA", True, text_color
             )
             dba_rect = dba_text.get_rect()
             dba_rect.topright = (screen.get_width() - 50, 50)
