@@ -829,20 +829,30 @@ def _ensure_labwc():
     except OSError:
         pass
 
-    # Launch labwc WITHOUT -s (no startup command — it stays as a bare compositor)
+    # Launch labwc with a long-lived no-op startup command.
+    # labwc requires -s to fully initialize its Wayland socket on DRM/KMS backends (Pi Zero 2).
+    # "sleep infinity" keeps labwc alive as a bare compositor ready to accept client connections.
     _labwc_process = subprocess.Popen(
-        [labwc_bin], env=env, start_new_session=True,
+        [labwc_bin, "-s", "sleep infinity"], env=env, start_new_session=True,
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
     )
     logging.info(f"Started persistent labwc compositor (PID {_labwc_process.pid}).")
 
-    # Wait for the new Wayland socket to appear (max ~2s)
-    for attempt in range(40):
+    # Wait for the new Wayland socket to appear (max ~5s, Pi Zero 2 can be slow)
+    for attempt in range(50):
+        # Check if labwc died during startup
+        if _labwc_process.poll() is not None:
+            rc = _labwc_process.returncode
+            _labwc_process = None
+            raise RuntimeError(f"labwc exited during startup with code {rc}")
+
         try:
             current_sockets = {f for f in os.listdir(runtime_dir) if f.startswith("wayland-") and not f.endswith(".lock")}
         except OSError:
             current_sockets = set()
         new_sockets = current_sockets - existing_sockets
+        if attempt % 10 == 9:
+            logging.debug(f"labwc socket poll #{attempt+1}: existing={existing_sockets}, current={current_sockets}")
         for name in sorted(new_sockets):
             if _is_wayland_reachable(name):
                 _labwc_wayland_display = name
@@ -854,16 +864,16 @@ def _ensure_labwc():
                 return name
         # Also check common names in case the snapshot missed it
         for name in ["wayland-0", "wayland-1"]:
-            if name not in existing_sockets and _is_wayland_reachable(name):
+            if _is_wayland_reachable(name):
                 _labwc_wayland_display = name
                 os.environ["WAYLAND_DISPLAY"] = name
                 _display_env_detected = True
                 logging.info(f"labwc Wayland socket ready: {name}")
                 threading.Thread(target=_labwc_hide_cursor, daemon=True).start()
                 return name
-        time.sleep(0.05)
+        time.sleep(0.1)
 
-    raise RuntimeError("labwc started but no Wayland socket detected within 2s")
+    raise RuntimeError("labwc started but no Wayland socket detected within 5s")
 
 
 def _labwc_hide_cursor():
