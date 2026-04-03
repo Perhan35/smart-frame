@@ -248,17 +248,18 @@ ema_rms_a = 0.0
 ema_rms_z = 0.0
 
 # --- SPECTRUM ANALYZER CONFIGURATION ---
-NUM_BANDS = 96           # High density while maintaining distinct bar clarity
+NUM_BANDS = 96           
 MIN_FREQ = 25
 MAX_FREQ = 24000
-MIN_DB = 52              # Increased floor for near-perfect silence clearing
-MAX_DB = 112             # Substantial headroom for loud music
-SMOOTHING_FACTOR = 0.70  # Aggressive energy tracking
-PEAK_GRAVITY = 0.03
-PEAK_MAX_SPEED = 0.10
-NOISE_GATE_THRESHOLD = 0.03 # Deeper gate for cleaner background
+MIN_DB = 50              # Lower visual floor for sensitivity
+MAX_DB = 130             # Substantially more headroom (Decibel X style)
+SMOOTHING_FACTOR = 0.70  
+PEAK_GRAVITY = 0.035
+PEAK_MAX_SPEED = 0.12
+NOISE_GATE_LOW = 0.08    # Stricter gate for lows to remove baseline jitter
+NOISE_GATE_HIGH = 0.03   # Standard gate for highs
 
-# Professional Slope Setting: Lowered for more accurate mic profile representation
+# Professional Slope Setting: 2.0dB/octave matches modern reference curves
 SLOPE_DB_PER_OCTAVE = 2.0 
 
 # Frequency Range Definitions (Cleaned up for 25Hz-24kHz)
@@ -415,15 +416,24 @@ while running:
                     current_bar_targets[i] = np.clip(norm_val, 0, 1)
 
             # Apply visual smoothing (fast rise, slow decay)
+            max_energy_idx = -1
+            max_energy_val = -1
+            
             for i in range(NUM_BANDS):
                 if current_bar_targets[i] > bar_heights[i]:
                     bar_heights[i] = current_bar_targets[i] # Instant rise
                 else:
                     bar_heights[i] *= SMOOTHING_FACTOR      # Exponential decay
 
-                # Noise Gate logic: If below threshold, snap to bottom
-                if bar_heights[i] < NOISE_GATE_THRESHOLD:
+                # Dynamic Noise Gate logic: Frequency-dependent threshold
+                threshold = NOISE_GATE_LOW if band_centers[i] < 1000 else NOISE_GATE_HIGH
+                if bar_heights[i] < threshold:
                     bar_heights[i] = 0
+
+                # Identify dominant frequency (Peak highlight)
+                if bar_heights[i] > max_energy_val and bar_heights[i] > 0.15:
+                    max_energy_val = bar_heights[i]
+                    max_energy_idx = i
 
                 # Professional Unity-style peak handling (Gravity based)
                 if bar_heights[i] > peak_pos[i]:
@@ -450,29 +460,33 @@ while running:
                 
                 x = start_x + i * (bar_width + bar_spacing)
                 
-                # Professional Spectral Gradient synchronized with UI legends:
-                # BASS (Blue) -> MIDS (Green) -> TREBLE (Orange/Red)
+                # Transition from BASS (Blue) -> MIDS (Green) -> TREBLE (Orange/Red)
                 f_center = band_centers[i]
                 
-                if f_center < 250: # Bass Range
-                    color = (100, 150, 255)
-                elif f_center < 4000: # Mids Range
-                    # Linear interpolate between Green and Blue for transition
-                    mix = (f_center - 250) / 3750
-                    r = int(100 + (150 - 100) * mix)
-                    g = int(150 + (255 - 150) * mix)
-                    b = int(255 + (150 - 255) * mix)
-                    color = (r, g, b)
-                else: # Treble Range
-                    # Linear interpolate between Orange and Green
-                    mix = min(1.0, (f_center - 4000) / 16000)
-                    r = int(150 + (255 - 150) * mix)
-                    g = int(255 + (150 - 255) * mix)
-                    b = int(150 + (100 - 150) * mix)
-                    color = (r, g, b)
-                
-                # Height-based brightness boost
-                intensity = 0.7 + 0.3 * bar_heights[i]
+                # Check if this is the peak frequency (Decibel X style white highlight)
+                if i == max_energy_idx:
+                    color = (255, 255, 255)
+                    intensity = 1.0
+                else:
+                    if f_center < 250: # Bass Range
+                        color = (100, 150, 255)
+                    elif f_center < 4000: # Mids Range
+                        mix = (f_center - 250) / 3750
+                        r = int(100 + (100 - 100) * mix)
+                        g = int(150 + (255 - 150) * mix)
+                        b = int(255 + (150 - 255) * mix)
+                        color = (r, g, b)
+                    else: # Treble Range
+                        mix = min(1.0, (f_center - 4000) / 16000)
+                        # More vibrant Orange/Red for the high end to match legends
+                        r = int(100 + (255 - 100) * mix)
+                        g = int(255 + (130 - 255) * mix)
+                        b = int(150 + (60 - 150) * mix)
+                        color = (r, g, b)
+                    
+                    # Height-based brightness boost
+                    intensity = 0.7 + 0.3 * bar_heights[i]
+                    
                 final_color = (int(color[0] * intensity), int(color[1] * intensity), int(color[2] * intensity))
                 
                 if h > 5:
