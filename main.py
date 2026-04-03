@@ -821,11 +821,27 @@ def _ensure_labwc():
     env["XCURSOR_SIZE"] = "0"
     env["COG_PLATFORM_FDO_SHOW_CURSOR"] = "0"
 
-    # Snapshot existing wayland sockets to detect the new one
+    # Clean up stale wayland sockets so labwc can claim wayland-0 cleanly.
+    # On Pi Zero 2, stale socket files from previous crashed sessions block labwc from
+    # creating its own socket (name collision), causing the socket detection to time out.
     runtime_dir = os.environ.get("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}")
-    existing_sockets = set()
     try:
-        existing_sockets = {f for f in os.listdir(runtime_dir) if f.startswith("wayland-") and not f.endswith(".lock")}
+        for f in os.listdir(runtime_dir):
+            if f.startswith("wayland-") and not f.endswith(".lock"):
+                if not _is_wayland_reachable(f):
+                    stale = os.path.join(runtime_dir, f)
+                    try:
+                        os.remove(stale)
+                        logging.debug(f"Removed stale Wayland socket: {stale}")
+                    except OSError:
+                        pass
+                    # Also remove the companion .lock file
+                    lock = stale + ".lock"
+                    if os.path.exists(lock):
+                        try:
+                            os.remove(lock)
+                        except OSError:
+                            pass
     except OSError:
         pass
 
@@ -838,39 +854,25 @@ def _ensure_labwc():
     )
     logging.info(f"Started persistent labwc compositor (PID {_labwc_process.pid}).")
 
-    # Wait for the new Wayland socket to appear (max ~5s, Pi Zero 2 can be slow)
+    # Wait for labwc's Wayland socket to become reachable (max ~5s, Pi Zero 2 can be slow).
+    # Stale sockets were cleaned above, so any reachable socket is from our new labwc.
     for attempt in range(50):
-        # Check if labwc died during startup
         if _labwc_process.poll() is not None:
             rc = _labwc_process.returncode
             _labwc_process = None
             raise RuntimeError(f"labwc exited during startup with code {rc}")
 
-        try:
-            current_sockets = {f for f in os.listdir(runtime_dir) if f.startswith("wayland-") and not f.endswith(".lock")}
-        except OSError:
-            current_sockets = set()
-        new_sockets = current_sockets - existing_sockets
+        for name in ["wayland-0", "wayland-1", "wayland-2"]:
+            if _is_wayland_reachable(name):
+                _labwc_wayland_display = name
+                os.environ["WAYLAND_DISPLAY"] = name
+                _display_env_detected = True
+                logging.info(f"labwc Wayland socket ready: {name} (after {(attempt+1)*0.1:.1f}s)")
+                threading.Thread(target=_labwc_hide_cursor, daemon=True).start()
+                return name
+
         if attempt % 10 == 9:
-            logging.debug(f"labwc socket poll #{attempt+1}: existing={existing_sockets}, current={current_sockets}")
-        for name in sorted(new_sockets):
-            if _is_wayland_reachable(name):
-                _labwc_wayland_display = name
-                os.environ["WAYLAND_DISPLAY"] = name
-                _display_env_detected = True
-                logging.info(f"labwc Wayland socket ready: {name}")
-                # Hide cursor once for the lifetime of this compositor
-                threading.Thread(target=_labwc_hide_cursor, daemon=True).start()
-                return name
-        # Also check common names in case the snapshot missed it
-        for name in ["wayland-0", "wayland-1"]:
-            if _is_wayland_reachable(name):
-                _labwc_wayland_display = name
-                os.environ["WAYLAND_DISPLAY"] = name
-                _display_env_detected = True
-                logging.info(f"labwc Wayland socket ready: {name}")
-                threading.Thread(target=_labwc_hide_cursor, daemon=True).start()
-                return name
+            logging.debug(f"labwc socket poll #{attempt+1}: still waiting...")
         time.sleep(0.1)
 
     raise RuntimeError("labwc started but no Wayland socket detected within 5s")
@@ -999,8 +1001,12 @@ def start_mode(mode):
     # 6. Ensure a display session exists.
     setup_display_env()
 
-    if not os.environ.get("WAYLAND_DISPLAY") and not os.environ.get("DISPLAY"):
-        # No external display server — start or reuse persistent labwc compositor
+    # Always verify/reuse our persistent labwc if it's running, OR start one if no display exists.
+    # Without this, mode-to-mode switches (e.g. audio→mirror) would skip the health check
+    # because WAYLAND_DISPLAY is still set from the previous labwc session.
+    if _labwc_process is not None or (
+        not os.environ.get("WAYLAND_DISPLAY") and not os.environ.get("DISPLAY")
+    ):
         try:
             wayland_display = _ensure_labwc()
             env["WAYLAND_DISPLAY"] = wayland_display
