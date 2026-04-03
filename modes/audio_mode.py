@@ -34,8 +34,9 @@ DEVICE_INDEX_ENV = os.environ.get("SMARTFRAME_AUDIO_DEVICE")
 if DEVICE_INDEX_ENV and DEVICE_INDEX_ENV != "None" and DEVICE_INDEX_ENV != "":
     DEVICE_INDEX = int(DEVICE_INDEX_ENV)
 
-# Audio Configuration (Defaults)
-CHUNK = 8192  # High-precision 8k FFT for maximum visual resolution
+# Audio Configuration (High-Performance Smoothing)
+CHUNK_READ = 1024  # Small chunks for high-speed ~47Hz UI updates
+FFT_SIZE = 8192    # High-precision 8k FFT for maximum visual resolution
 FORMAT = pyaudio.paInt16
 CHANNELS = 1
 SAMPLE_RATE = 48000
@@ -154,11 +155,17 @@ try:
             if info.get("maxInputChannels", 0) > 0:
                 device_info = info
                 selected_index = DEVICE_INDEX
-                print(f"Using configured audio device ({selected_index}): '{device_info.get('name')}'")
+                print(
+                    f"Using configured audio device ({selected_index}): '{device_info.get('name')}'"
+                )
             else:
-                print(f"Warning: Configured device {DEVICE_INDEX} has no input channels. Probing alternatives...")
+                print(
+                    f"Warning: Configured device {DEVICE_INDEX} has no input channels. Probing alternatives..."
+                )
         except Exception as e:
-            print(f"Warning: Primary device {DEVICE_INDEX} check failed: {e}. Searching...")
+            print(
+                f"Warning: Primary device {DEVICE_INDEX} check failed: {e}. Searching..."
+            )
 
     if not device_info:
         print("Probing system default audio input...")
@@ -167,11 +174,15 @@ try:
             if info.get("maxInputChannels", 0) > 0:
                 device_info = info
                 selected_index = device_info.get("index")
-                print(f"  - Default is '{device_info.get('name')}' (Index {selected_index}). Success.")
+                print(
+                    f"  - Default is '{device_info.get('name')}' (Index {selected_index}). Success."
+                )
             else:
                 print("  - Default input has no channels. Searching all devices...")
         except Exception as e:
-            print(f"  - System default input not available: {e}. Searching all devices...")
+            print(
+                f"  - System default input not available: {e}. Searching all devices..."
+            )
 
     if not device_info:
         print(f"Broadly scanning all {p.get_device_count()} audio devices...")
@@ -214,7 +225,7 @@ try:
         "rate": SAMPLE_RATE,
         "input": True,
         "input_device_index": selected_index,
-        "frames_per_buffer": CHUNK,
+        "frames_per_buffer": CHUNK_READ,
     }
 
     # A-weighting gain pre-calculation
@@ -233,18 +244,21 @@ try:
         w[0] = 0.0
         return w
 
-    a_gains = get_a_weighting_gains(SAMPLE_RATE, CHUNK)
-    dt = CHUNK / SAMPLE_RATE
+    a_gains = get_a_weighting_gains(SAMPLE_RATE, FFT_SIZE)
+    dt = CHUNK_READ / SAMPLE_RATE
     fast_alpha = 1.0 - np.exp(-dt / 0.125)  # 125ms FAST integration time
 
     stream = p.open(**stream_params)
+    # Initialize rolling audio buffer for sliding window FFT
+    audio_buffer = np.zeros(FFT_SIZE, dtype=np.float32)
 except Exception as e:
     print(f"Fatal error opening audio stream: {e}")
     print(
         "Ensure the INMP441 I2S microphone is properly connected and configured (ALSA/dtoverlay)."
     )
     # Ensure bridge variables and gains are defined even in failure state
-    a_gains = np.ones(CHUNK // 2 + 1)  # Flat gains as fallback
+    a_gains = np.ones(FFT_SIZE // 2 + 1)  # Flat gains as fallback
+    audio_buffer = np.zeros(FFT_SIZE, dtype=np.float32)
     stream = None
 
 running = True
@@ -269,17 +283,19 @@ MIN_FREQ = 25
 MAX_FREQ = 24000
 MIN_DB = 65
 MAX_DB = 145  # Balanced range for high-energy music
-SMOOTHING_FACTOR = 0.72  # Fast rise, natural decay
-CURVE_SMOOTHING = 0.85  # Additional smoothing for the visual curve
-PEAK_GRAVITY = 0.04
-PEAK_MAX_SPEED = 0.15
+# Smoothing adjusted for ultra-reactive and smooth ~47Hz updates
+SMOOTHING_FACTOR = 0.92  # Slightly faster decay for a more 'alive' feel
+RISE_SMOOTHING = 0.88    # High reactivity: 88% of the delta in a single frame
+CURVE_SMOOTHING = 0.88  # Reduced dampening on the visual curve for more impact
+PEAK_GRAVITY = 0.003     # Gravity adjusted for faster frame rate
+PEAK_MAX_SPEED = 0.05    # Max speed adjusted for faster frame rate
 NOISE_GATE_LOW = 0.12  # Stricter gate to remove baseline mic noise
 NOISE_GATE_MID = 0.08  # Gate for mid-ranges
 NOISE_GATE_HIGH = 0.05  # Surgical floor for clarity
 
 # Professional Slope Setting: Increased to 4.0dB for better visual high-end energy
 SLOPE_DB_PER_OCTAVE = 4.0
-HIGH_FREQ_BOOST = 5  # Reduced slightly to 4.5dB for ultra-high frequencies (>10kHz)
+HIGH_FREQ_BOOST = 4.5  # Reduced slightly to 4.5dB for ultra-high frequencies (>10kHz)
 
 # Frequency Range Definitions (Synchronized with Legend Color Boundaries)
 FREQ_RANGES = [
@@ -330,13 +346,13 @@ def get_log_bands(sample_rate, fft_size, num_bands, min_f, max_f):
 
 
 band_indices, band_edges, band_centers = get_log_bands(
-    SAMPLE_RATE, CHUNK, NUM_BANDS, MIN_FREQ, MAX_FREQ
+    SAMPLE_RATE, FFT_SIZE, NUM_BANDS, MIN_FREQ, MAX_FREQ
 )
 bar_heights = np.zeros(NUM_BANDS)
 peak_heights = np.zeros(NUM_BANDS)
 
 # Blackman-Harris window for ultra-low spectral leakage (Mastering grade)
-fft_window = np.blackman(CHUNK)
+fft_window = np.blackman(FFT_SIZE)
 
 # Calculate professional visual tilt based on the requested slope
 # We use 1kHz as the zero-crossing reference point
@@ -434,23 +450,25 @@ while running:
 
     if stream:
         try:
-            # Read data from the microphone
-            raw_data = stream.read(CHUNK, exception_on_overflow=False)
-            data = np.frombuffer(raw_data, dtype=np.int16)
+            # Read audio data (sliding window approach)
+            raw_data = stream.read(CHUNK_READ, exception_on_overflow=False)
+            new_data = np.frombuffer(raw_data, dtype=np.int16).astype(np.float32)
 
             # If stereo is used, average the channels to mono for DSP
             if CHANNELS > 1:
-                data = data.reshape(-1, CHANNELS).mean(axis=1)
-            else:
-                data = data.astype(np.float32)
+                new_data = new_data.reshape(-1, CHANNELS).mean(axis=1)
 
-            # Apply Hann window to raw data before FFT (Pro standard)
-            windowed_data = data * fft_window
+            # Roll buffer and insert new samples
+            audio_buffer = np.roll(audio_buffer, -len(new_data))
+            audio_buffer[-len(new_data) :] = new_data
+
+            # Apply Hann window to buffer before FFT
+            windowed_data = audio_buffer * fft_window
 
             # --- AUDIO DSP BLOCK ---
             # 1. Forward FFT (on windowed data)
             fft_complex = np.fft.rfft(windowed_data)
-            freqs = np.fft.rfftfreq(len(data), 1.0 / SAMPLE_RATE)
+            freqs = np.fft.rfftfreq(len(audio_buffer), 1.0 / SAMPLE_RATE)
 
             # 2. DC/VLF Removal (Low-cut at 1Hz instead of 100Hz for user request)
             fft_complex[freqs < 1] = 0
@@ -538,7 +556,10 @@ while running:
 
             for i in range(NUM_BANDS):
                 if current_bar_targets[i] > bar_heights[i]:
-                    bar_heights[i] = current_bar_targets[i]  # Instant rise
+                    # Interpolated smoothing for the rise
+                    bar_heights[i] = bar_heights[i] + RISE_SMOOTHING * (
+                        current_bar_targets[i] - bar_heights[i]
+                    )
                 else:
                     bar_heights[i] *= SMOOTHING_FACTOR  # Exponential decay
 

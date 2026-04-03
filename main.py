@@ -1180,73 +1180,85 @@ if __name__ == "__main__":
     # 1. Initial State: Screen off until a mode starts
     set_display_power(False)
 
-    # 2. Connect to MQTT with automatic retry
+    # 2. Start command worker thread (Handle all transitions sequentially)
+    worker = threading.Thread(target=command_worker, daemon=True)
+    worker.start()
+    logging.debug("Command worker thread started.")
+
+    # 3. Connect to MQTT with automatic retry
     try:
         if MQTT_BROKER != "[MQTT_SERVER_IP_ADDRESS]":
-            # Set shorter keepalive and infinite reconnection delay
-            mqtt_client.connect(MQTT_BROKER, MQTT_PORT, 60)
+            # We use connect_async + loop_start to ensure startup isn't blocked by the broker
+            mqtt_client.connect_async(MQTT_BROKER, MQTT_PORT, 60)
+            mqtt_client.loop_start()
+            logging.info(f"MQTT network loop started (Broker: {MQTT_BROKER}).")
         else:
             logging.warning("MQTT broker IP not configured. Starting in OFFLINE mode.")
     except Exception as e:
-        logging.error(
-            f"Error connecting to MQTT broker: {e}. Orchestrator will retry in background."
-        )
+        logging.error(f"Error initiating MQTT connection: {e}")
 
-    # 3. Start default mode from config
+    # 4. Request initial state from configuration via the worker queue
+    # This prevents the initial mode from racing with MQTT retained 'set_mode' messages
     default_mode = config.get("default_mode", "off")
-    start_mode(default_mode)
+    command_queue.put(("mode", default_mode))
+    logging.info(f"Queued initial mode request: {default_mode}")
+
+    # 5. Start background dBA monitor thread
+    audio_monitor_thread = AudioMonitor(config, mqtt_client)
+    audio_monitor_thread.start()
+
+    last_sync_time = time.time()
 
     try:
-        if MQTT_BROKER != "[MQTT_SERVER_IP_ADDRESS]":
-            # 1. Start command worker thread
-            worker = threading.Thread(target=command_worker, daemon=True)
-            worker.start()
-            logging.debug("Command worker thread started.")
-
-            # 2. Start MQTT loop (non-blocking thread)
-            mqtt_client.loop_start()
-            logging.debug("MQTT network loop thread started.")
-
-            # 3. Start default mode from config
-            default_mode = config.get("default_mode", "off")
-            start_mode(default_mode)
-
-            # 4. Start background dBA monitor thread
-            audio_monitor_thread = AudioMonitor(config, mqtt_client)
-            audio_monitor_thread.start()
-
-        # --- GLOBAL FAIL-SAFE LOOP ---
-        # This keeps the main thread alive and monitors the active mode process (heartbeat/watchdog)
+        # --- GLOBAL FAIL-SAFE & SYNC LOOP (State Guardian) ---
         while True:
-            # 1. Check if the current mode process has crashed unexpectedly
+            now = time.time()
+
+            # 1. Watchdog: Check if the current mode process has crashed unexpectedly
             if current_mode != "off" and current_process:
                 poll_res = current_process.poll()
                 if poll_res is not None:
                     logging.error(
-                        f"FAIL-SAFE: Mode process '{current_mode}' exited unexpectedly with code {poll_res}."
+                        f"FAIL-SAFE: Mode process '{current_mode}' exited unexpectedly (code {poll_res})."
                     )
-                    logging.info(
-                        "Forcing display power OFF to prevent showing broken state."
-                    )
-                    # Force display off and set mode to 'off' to prevent repeated attempts
                     set_display_power(False)
                     current_mode = "off"
+                    current_process = None
                     if mqtt_client and mqtt_client.is_connected():
                         mqtt_client.publish(MQTT_STATE_TOPIC, current_mode, retain=True)
+
+            # 2. Smart Detection: Sync state if we see 'phantom' activity
+            # If Audio Mode bridge is active but orchestrator thinks we are 'off'
+            bridge_file = "/tmp/smartframe_dba"
+            if os.path.exists(bridge_file):
+                try:
+                    # If bridge was updated in the last 10 seconds
+                    if now - os.path.getmtime(bridge_file) < 10.0:
+                        if current_mode == "off":
+                            logging.warning("GUARDIAN: Audio bridge active but state is 'off'. Re-syncing to 'audio'.")
+                            current_mode = "audio"
+                            if mqtt_client and mqtt_client.is_connected():
+                                mqtt_client.publish(MQTT_STATE_TOPIC, "audio", retain=True)
+                except Exception:
+                    pass
+
+            # 3. Periodic UI Sync: Re-publish state every 30s to fix any HA display issues
+            if now - last_sync_time > 30.0:
+                if mqtt_client and mqtt_client.is_connected():
+                    mqtt_client.publish(MQTT_STATE_TOPIC, current_mode, retain=True)
+                    # Also sync display attributes
+                    mqtt_client.publish(MQTT_BRIGHTNESS_STATE_TOPIC, str(_working_methods.get("brightness", 100)), retain=True)
+                last_sync_time = now
 
             time.sleep(1)
 
     except KeyboardInterrupt:
-        logging.info("KeyboardInterrupt: Shutting down...")
+        logging.info("Shutting down...")
     except Exception as e:
-        logging.critical(f"FATAL SOFTWARE ERROR: Orchestrator main loop crashed: {e}")
-        # This is the 'software bug' scenario mentioned by the user
+        logging.critical(f"FATAL: Orchestrator loop crashed: {e}")
     finally:
-        logging.info("--- TRIGGERING GLOBAL FAIL-SAFE EXIT ---")
-        # Ensure we always attempt to kill any child processes and turn off the screen on exit
         stop_current_mode()
         set_display_power(False)
         if mqtt_client:
             mqtt_client.loop_stop()
-            logging.info("MQTT loop stopped.")
         logging.info("--- SmartFrame Orchestrator terminated ---")
