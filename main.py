@@ -8,6 +8,9 @@ import paho.mqtt.client as mqtt
 import logging
 import signal
 import socket
+import threading
+import numpy as np
+import pyaudio
 
 # Load configuration
 config_path = os.path.join(os.path.dirname(__file__), 'config.yaml')
@@ -45,6 +48,7 @@ MQTT_COLOR_PRESET_COMMAND_TOPIC = mqtt_config.get('color_preset_topic', 'smartfr
 MQTT_COLOR_PRESET_STATE_TOPIC = mqtt_config.get('color_preset_state_topic', 'smartframe/color_preset_state')
 MQTT_INPUT_SOURCE_COMMAND_TOPIC = mqtt_config.get('input_source_topic', 'smartframe/set_input_source')
 MQTT_INPUT_SOURCE_STATE_TOPIC = mqtt_config.get('input_source_state_topic', 'smartframe/input_source_state')
+MQTT_DBA_STATE_TOPIC = mqtt_config.get('dba_state_topic', 'smartframe/audio/dba')
 MQTT_USER = mqtt_config.get('username')
 MQTT_PASS = mqtt_config.get('password')
 
@@ -55,6 +59,7 @@ current_process = None
 current_mode = 'off'
 mqtt_client = None
 labwc_config_dir = None
+audio_monitor_thread = None
 
 # Discovery cache to avoid repeated slow subprocess calls
 CACHE_FILE = os.path.join(os.path.dirname(__file__), '.smartframe_cache')
@@ -131,6 +136,128 @@ def _discover_audio_device():
     except Exception as e:
         logging.debug(f"Audio discovery failed: {e}")
     return None
+
+class AudioMonitor(threading.Thread):
+    """Background thread that monitors ambient dB levels and reports to MQTT."""
+    def __init__(self, config, mq_client):
+        super().__init__(daemon=True)
+        self.config = config
+        self.mqtt_client = mq_client
+        self.running = True
+        self.chunk = 4096
+        self.rate = 48000
+        self.audio_config = config.get('audio', {})
+        self.dba_topic = config.get('mqtt', {}).get('dba_state_topic', 'smartframe/audio/dba')
+        self.calibration_offset = self.audio_config.get('calibration_offset_db', 0)
+        self.last_publish = 0
+        
+    def _get_a_weighting_gains(self, rate, chunk):
+        freqs = np.fft.rfftfreq(chunk, 1.0 / rate)
+        valid_freqs = np.where(freqs == 0, 1e-10, freqs)
+        f_sq = valid_freqs**2
+        const = (12194**2) * (f_sq**2)
+        den = ((f_sq + 20.6**2) * np.sqrt((f_sq + 107.7**2) * (f_sq + 737.9**2)) * (f_sq + 12194**2))
+        w = const / den
+        w *= 1.2589
+        w[0] = 0.0
+        return w
+
+    def run(self):
+        logging.info("Audio Monitor background thread started.")
+        p = pyaudio.PyAudio()
+        stream = None
+        bridge_file = "/tmp/smartframe_dba"
+        a_gains = self._get_a_weighting_gains(self.rate, self.chunk)
+        ema_a = 0.0
+        alpha = 1.0 - np.exp(-(self.chunk / self.rate) / 0.125) # Fast integration
+
+        while self.running:
+            # 1. First, check if Audio Mode is writing the value to our IPC bridge
+            use_bridge = False
+            db_a = None
+            if os.path.exists(bridge_file):
+                try:
+                    # Check if the file is recent (less than 5 seconds old)
+                    if time.time() - os.path.getmtime(bridge_file) < 5.0:
+                        with open(bridge_file, "r") as f:
+                            val = f.read().strip()
+                            if val:
+                                db_a = float(val)
+                                use_bridge = True
+                                # If we were using the mic, close it to free resources for audio_mode
+                                if stream:
+                                    try: stream.stop_stream(); stream.close()
+                                    except: pass
+                                    stream = None
+                except Exception as e:
+                    logging.debug(f"Monitor: Bridge file read failed: {e}")
+
+            if not use_bridge:
+                # 2. No bridge file or it's stale. Try to use the microphone directly.
+                if not stream:
+                    try:
+                        idx = _discover_audio_device()
+                        if idx is not None:
+                            stream = p.open(format=pyaudio.paInt16, channels=1, rate=self.rate,
+                                            input=True, input_device_index=idx, 
+                                            frames_per_buffer=self.chunk)
+                        else:
+                            time.sleep(5)
+                            continue
+                    except Exception as e:
+                        logging.debug(f"Monitor: Failed to open device (busy?): {e}")
+                        time.sleep(5)
+                        continue
+
+                try:
+                    raw_data = stream.read(self.chunk, exception_on_overflow=False)
+                    data = np.frombuffer(raw_data, dtype=np.int16).astype(np.float32)
+                    
+                    fft_complex = np.fft.rfft(data)
+                    fft_aw = fft_complex * a_gains
+                    data_aw = np.fft.irfft(fft_aw)
+                    rms_a = np.sqrt(np.mean(data_aw**2))
+                    
+                    if ema_a == 0: ema_a = rms_a
+                    else: ema_a += alpha * (rms_a - ema_a)
+                    
+                    db_a = (20 * np.log10(max(1e-9, ema_a))) + self.calibration_offset
+                    
+                    if db_a < 45:
+                        correction = 8.0 * (1.0 - (max(30, db_a) - 30) / 15)
+                        db_a -= correction
+                        
+                except Exception as e:
+                    logging.debug(f"Monitor Mic Loop Error: {e}")
+                    if stream:
+                        try: stream.stop_stream(); stream.close()
+                        except: pass
+                        stream = None
+                    time.sleep(2)
+                    continue
+
+            # 3. Publish result to MQTT (throttled to 2s)
+            now = time.time()
+            if now - self.last_publish >= 2.0 and db_a is not None:
+                if self.mqtt_client and self.mqtt_client.is_connected():
+                    try:
+                        self.mqtt_client.publish(self.dba_topic, f"{db_a:.1f}", retain=False)
+                        self.last_publish = now
+                    except Exception:
+                        pass
+            
+            # Simple sleep to reduce CPU usage if we're not waiting on audio stream read
+            if use_bridge:
+                time.sleep(1.0)
+
+        if stream:
+            try: stream.stop_stream(); stream.close()
+            except: pass
+        p.terminate()
+        # Cleanup bridge file on exit
+        if os.path.exists(bridge_file):
+            try: os.remove(bridge_file)
+            except: pass
 
 def _load_cache():
     global _working_methods
@@ -664,8 +791,15 @@ def publish_discovery_and_status(client):
         "icon": "mdi:video-input-hdmi", "availability": [{"topic": MQTT_STATUS_TOPIC}],
         "device": {"identifiers": ["smartframe_orchestrator"]}
     }), retain=True)
+
+    client.publish(f"{MQTT_DISCOVERY_PREFIX}/sensor/smartframe/dba/config", json.dumps({
+        "name": "SmartFrame Ambient Sound", "unique_id": "sf_audio_dba",
+        "state_topic": MQTT_DBA_STATE_TOPIC, "unit_of_measurement": "dBA",
+        "value_template": "{{ value }}", "icon": "mdi:ear-hearing",
+        "availability": [{"topic": MQTT_STATUS_TOPIC}], "device": {"identifiers": ["smartframe_orchestrator"]}
+    }), retain=True)
     
-    logging.info("Published Home Assistant MQTT discovery payloads (Universal Display Control).")
+    logging.info("Published Home Assistant MQTT discovery payloads (Universal Display Control + Audio).")
 
 def on_connect(client, userdata, _connect_flags, reason_code, _properties):
     global current_mode
@@ -721,6 +855,9 @@ def on_message(client, userdata, msg):
 
 def signal_handler(sig, frame):
     logging.info(f"Signal {sig} received. Shutting down orchestrator...")
+    global audio_monitor_thread
+    if audio_monitor_thread:
+        audio_monitor_thread.running = False
     stop_current_mode()
     sys.exit(0)
 
@@ -780,6 +917,14 @@ if __name__ == '__main__':
             # Use loop_start (non-blocking thread) to allow the main thread to monitor processes
             mqtt_client.loop_start()
             logging.debug("MQTT background thread started.")
+        
+            # 3. Start default mode from config
+            default_mode = config.get('default_mode', 'off')
+            start_mode(default_mode)
+
+            # 4. Start background dBA monitor thread
+            audio_monitor_thread = AudioMonitor(config, mqtt_client)
+            audio_monitor_thread.start()
         
         # --- GLOBAL FAIL-SAFE LOOP ---
         # This keeps the main thread alive and monitors the active mode process (heartbeat/watchdog)

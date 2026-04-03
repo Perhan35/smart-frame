@@ -248,6 +248,7 @@ font_tiny = pygame.font.Font(None, 25)
 last_ui_update_time = time.time()
 last_displayed_dba = 0
 last_displayed_dbz = 0
+last_bridge_update = 0
 ema_rms_a = 0.0
 ema_rms_z = 0.0
 
@@ -267,15 +268,13 @@ NOISE_GATE_HIGH = 0.05  # Surgical floor for clarity
 
 # Professional Slope Setting: Increased to 4.0dB for better visual high-end energy
 SLOPE_DB_PER_OCTAVE = 4.0
-HIGH_FREQ_BOOST = (
-    6.0  # Additional +6dB for frequencies above 10kHz (Compensate mic roll-off)
-)
+HIGH_FREQ_BOOST = 5  # Reduced slightly to 4.5dB for ultra-high frequencies (>10kHz)
 
 # Frequency Range Definitions (Synchronized with Legend Color Boundaries)
 FREQ_RANGES = [
     {"name": "BASS", "min": 20, "max": 225, "level": 1, "color": (100, 150, 255)},
-    {"name": "MIDS", "min": 225, "max": 2000, "level": 1, "color": (150, 255, 150)},
-    {"name": "TREBLE", "min": 2000, "max": 24000, "level": 1, "color": (255, 150, 100)},
+    {"name": "MIDS", "min": 225, "max": 2500, "level": 1, "color": (150, 255, 150)},
+    {"name": "TREBLE", "min": 2500, "max": 24000, "level": 1, "color": (255, 150, 100)},
     {"name": "Sub", "min": 20, "max": 60, "level": 0, "color": (80, 120, 220)},
     {"name": "Low", "min": 60, "max": 250, "level": 0, "color": (100, 140, 240)},
     {"name": "Low-Mid", "min": 250, "max": 500, "level": 0, "color": (120, 220, 120)},
@@ -492,6 +491,17 @@ while running:
                 last_displayed_dbz = db_z
                 last_ui_update_time = current_time
 
+            # --- IPC BRIDGE FOR ORCHESTRATOR ---
+            # Write dBA to a temp file so the orchestrator can report it via MQTT
+            # while audio_mode holds the microphone.
+            if current_time - last_bridge_update >= 2.0:
+                try:
+                    with open("/tmp/smartframe_dba", "w") as f:
+                        f.write(f"{last_displayed_dba:.1f}")
+                    last_bridge_update = current_time
+                except Exception:
+                    pass
+
             # --- SPECTRUM VISUALIZATION BLOCK ---
             fft_mag = np.abs(fft_complex)
             current_bar_targets = np.zeros(NUM_BANDS)
@@ -592,14 +602,14 @@ while running:
 
                 # Professional Gradient Color Waypoints (Synchronized with Legend level 0)
                 w = [
-                    (20, 80, 120, 220),    # Sub
-                    (60, 100, 140, 240),   # Low
+                    (20, 80, 120, 220),  # Sub
+                    (60, 100, 140, 240),  # Low
                     (250, 120, 220, 120),  # Low-Mid
                     (500, 140, 240, 140),  # Mid
-                    (2000, 160, 255, 160), # Hi-Mid
-                    (5000, 240, 200, 120), # Highs
-                    (10000, 240, 150, 80), # Brilliance
-                    (24000, 220, 100, 60)  # Extended Brilliance
+                    (2000, 160, 255, 160),  # Hi-Mid
+                    (5000, 240, 200, 120),  # Highs
+                    (10000, 240, 150, 80),  # Brilliance
+                    (24000, 220, 100, 60),  # Extended Brilliance
                 ]
                 c = w[-1][1:]
                 for j in range(len(w) - 1):

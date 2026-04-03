@@ -7,6 +7,7 @@ mqtt:
   state_topic: "smartframe/mode_state"
   status_topic: "smartframe/status"
   available_modes_topic: "smartframe/modes_available"
+  dba_state_topic: "smartframe/audio/dba"
   discovery_prefix: "homeassistant"
 
 debug: false # Set to true to see all browser and subprocess output in the terminal
