@@ -110,6 +110,26 @@ else
 fi
 
 echo ""
+read -rp "Would you like to install the custom Smart Frame MOTD? [y/N] " motd_answer
+if [[ "$motd_answer" =~ ^[Yy]$ ]]; then
+    echo "== Installing custom MOTD... =="
+    # Remove default MOTD
+    sudo rm -f /etc/motd
+    # Create the directory if it doesn't exist
+    sudo mkdir -p /etc/update-motd.d
+    # Copy our script to the update-motd.d directory
+    sudo cp scripts/motd.sh /etc/update-motd.d/50-smartframe
+    sudo chmod +x /etc/update-motd.d/50-smartframe
+    # Ensure PrintMotd is enabled in SSH (sometimes people disable it)
+    # if grep -q "PrintMotd" /etc/ssh/sshd_config; then
+    #     sudo sed -i 's/PrintMotd .*/PrintMotd yes/' /etc/ssh/sshd_config
+    # else
+    #     echo "PrintMotd yes" | sudo tee -a /etc/ssh/sshd_config
+    # fi
+    echo "Custom MOTD installed. It will appear on your next login!"
+fi
+
+echo ""
 echo "!!! IMPORTANT !!!"
 echo "If this is your first time running setup, you MUST REBOOT for group"
 echo "permissions (video/render) to take effect:"
