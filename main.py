@@ -13,6 +13,20 @@ import threading
 import queue
 import numpy as np
 import pyaudio
+import ctypes
+
+# Suppress noisy ALSA errors from PyAudio hardware probing (they spam stderr with
+# "Expression 'ret' failed in pa_linux_alsa.c" during device enumeration)
+try:
+    _alsa_lib = ctypes.cdll.LoadLibrary('libasound.so.2')
+    _alsa_err_handler = ctypes.CFUNCTYPE(None, ctypes.c_char_p, ctypes.c_int,
+                                          ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p)
+    @_alsa_err_handler
+    def _alsa_noop_handler(filename, line, function, err, fmt):
+        pass
+    _alsa_lib.snd_lib_error_set_handler(_alsa_noop_handler)
+except Exception:
+    pass  # Not on Linux or libasound not available — no-op
 
 # Load configuration
 config_path = os.path.join(os.path.dirname(__file__), "config.yaml")
@@ -745,6 +759,20 @@ def stop_current_mode():
             except Exception:
                 pass
             labwc_config_dir = None
+
+        # Kill any orphaned browser/compositor processes from previous sessions
+        # This prevents "Connection reset by peer" errors when transitioning modes
+        for proc_name in ["chromium", "chromium-browser", "cog", "labwc"]:
+            try:
+                subprocess.run(
+                    ["pkill", "-f", proc_name],
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=2
+                )
+            except Exception:
+                pass
+
+        # Small settle time for kernel/DRM/Wayland to fully release resources
+        time.sleep(0.3)
 
         # Clear specific display environment variables as the session they belonged to is now dead
         if "WAYLAND_DISPLAY" in os.environ:
