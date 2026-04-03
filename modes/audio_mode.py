@@ -248,32 +248,33 @@ ema_rms_a = 0.0
 ema_rms_z = 0.0
 
 # --- SPECTRUM ANALYZER CONFIGURATION ---
-NUM_BANDS = 56
-MIN_FREQ = 1
-MAX_FREQ = 24000
-MIN_DB = 20
-MAX_DB = 82
-SMOOTHING_FACTOR = 0.82
-PEAK_DECAY = 0.95
+NUM_BANDS = 64           # Increased for even better resolution
+MIN_FREQ = 1            # Ultra-low range requested by user
+MAX_FREQ = 24000         # Up to Nyquist for 48kHz
+MIN_DB = 15              # More sensitivity for quiet details
+MAX_DB = 95              # More headroom to prevent saturation
+SMOOTHING_FACTOR = 0.85  # Slightly smoother
+PEAK_DECAY = 0.96
 
 # Professional Slope Setting: 0dB (Raw), 3dB (Pink Noise), 4.5dB (Modern Standard)
 # A slope of 4.5dB/octave is standard in pro plugins like FabFilter Pro-Q to make a 
 # balanced mix look "flat" visually.
 SLOPE_DB_PER_OCTAVE = 4.5 
 
-# Frequency Range Definitions for visual labels
+# Frequency Range Definitions for visual labels (Updated for 1Hz - 24kHz)
 FREQ_RANGES = [
-    {"name": "BASS", "min": 20, "max": 250, "level": 1, "color": (100, 150, 255)},
+    {"name": "BASS", "min": 1, "max": 250, "level": 1, "color": (100, 150, 255)},
     {"name": "MIDS", "min": 250, "max": 4000, "level": 1, "color": (150, 255, 150)},
-    {"name": "TREBLE", "min": 4000, "max": 20000, "level": 1, "color": (255, 150, 100)},
+    {"name": "TREBLE", "min": 4000, "max": 24000, "level": 1, "color": (255, 150, 100)},
     
+    {"name": "Infra", "min": 1, "max": 20, "level": 0, "color": (60, 100, 200)},
     {"name": "Sub", "min": 20, "max": 60, "level": 0, "color": (80, 120, 220)},
     {"name": "Low", "min": 60, "max": 250, "level": 0, "color": (100, 140, 240)},
     {"name": "Low-Mid", "min": 250, "max": 500, "level": 0, "color": (120, 220, 120)},
     {"name": "Mid", "min": 500, "max": 2000, "level": 0, "color": (140, 240, 140)},
     {"name": "Hi-Mid", "min": 2000, "max": 4000, "level": 0, "color": (160, 255, 160)},
     {"name": "Presence", "min": 4000, "max": 6000, "level": 0, "color": (240, 200, 120)},
-    {"name": "Brilliance", "min": 6000, "max": 20000, "level": 0, "color": (240, 150, 80)}
+    {"name": "Brilliance", "min": 6000, "max": 24000, "level": 0, "color": (240, 150, 80)}
 ]
 
 def get_log_bands(sample_rate, fft_size, num_bands, min_f, max_f):
@@ -341,8 +342,8 @@ while running:
             fft_complex = np.fft.rfft(windowed_data)
             freqs = np.fft.rfftfreq(len(data), 1.0 / SAMPLE_RATE)
             
-            # 2. DC/VLF Removal (High-Pass ~100Hz)
-            fft_complex[freqs < 100] = 0
+            # 2. DC/VLF Removal (Low-cut at 1Hz instead of 100Hz for user request)
+            fft_complex[freqs < 1] = 0
             
             # 3. Z-weighted (Raw) RMS
             # Time-domain approach (Original)
@@ -402,8 +403,8 @@ while running:
                     # Visual tilt: +4.5dB per octave approx (18dB over ~4 octaves of interest)
                     db_val = 20 * np.log10(max(1e-9, mag)) + CALIBRATION_OFFSET + visual_tilt[i]
                     
-                    # Normalize to 0.0 - 1.0 range (more sensitive: 20dB to 80dB)
-                    norm_val = (db_val - 20) / (80 - 20)
+                    # Normalize to 0.0 - 1.0 range (Headroom: 15dB to 95dB)
+                    norm_val = (db_val - MIN_DB) / (MAX_DB - MIN_DB)
                     current_bar_targets[i] = np.clip(norm_val, 0, 1)
 
             # Apply visual smoothing (fast rise, slow decay)
@@ -419,11 +420,11 @@ while running:
                 else:
                     peak_heights[i] *= PEAK_DECAY
 
-            # Draw the spectrum analyzer (Centered and refined)
-            analyzer_height = screen.get_height() // 2 - 50
-            analyzer_y_bottom = screen.get_height() - 120
-            bar_spacing = 6
-            total_bars_width = screen.get_width() - 240
+            # Draw the spectrum analyzer (Full width and refined)
+            analyzer_height = screen.get_height() // 2
+            analyzer_y_bottom = screen.get_height() - 150
+            bar_spacing = 4
+            total_bars_width = screen.get_width() - 80 # Use 95%+ of screen width
             bar_width = (total_bars_width // NUM_BANDS) - bar_spacing
             start_x = (screen.get_width() - (NUM_BANDS * (bar_width + bar_spacing))) // 2
 
