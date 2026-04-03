@@ -36,7 +36,13 @@ elif command -v chromium &> /dev/null; then
     BROWSER_CMD="chromium"
 elif command -v cog &> /dev/null; then
     BROWSER_TYPE="cog"
-    BROWSER_CMD="cog --bg-color=black"
+    BROWSER_CMD="cog"
+    # Cog is the lightweight WebKit browser for embedded systems
+    COG_PROFILE_DIR="$DIR/../.cog_profile"
+    mkdir -p "$COG_PROFILE_DIR"
+    # -A: Kiosk mode (fullscreen)
+    # --webprocess-failure=restart: Re-launch if the web content crashes
+    FULL_CMD="$BROWSER_CMD -A --bg-color=black --user-data-dir=$COG_PROFILE_DIR --webprocess-failure=restart"
 else
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] Error: neither chromium nor cog found."
     sleep 5
