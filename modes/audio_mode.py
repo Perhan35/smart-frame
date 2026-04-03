@@ -247,6 +247,48 @@ last_displayed_dbz = 0
 ema_rms_a = 0.0
 ema_rms_z = 0.0
 
+# --- SPECTRUM ANALYZER CONFIGURATION ---
+NUM_BANDS = 56           # Increased for wider range
+MIN_FREQ = 1            # Ultra-low range requested by user
+MAX_FREQ = 24000         # Up to Nyquist for 48kHz
+MIN_DB = 20
+MAX_DB = 82              # Slightly more sensitive
+SMOOTHING_FACTOR = 0.82  # Decay rate for bars
+PEAK_DECAY = 0.95        # Decay rate for peak indicators
+
+# Frequency Range Definitions for visual labels
+FREQ_RANGES = [
+    {"name": "BASS", "min": 20, "max": 250, "level": 1, "color": (100, 150, 255)},
+    {"name": "MIDS", "min": 250, "max": 4000, "level": 1, "color": (150, 255, 150)},
+    {"name": "TREBLE", "min": 4000, "max": 20000, "level": 1, "color": (255, 150, 100)},
+    
+    {"name": "Sub", "min": 20, "max": 60, "level": 0, "color": (80, 120, 220)},
+    {"name": "Low", "min": 60, "max": 250, "level": 0, "color": (100, 140, 240)},
+    {"name": "Low-Mid", "min": 250, "max": 500, "level": 0, "color": (120, 220, 120)},
+    {"name": "Mid", "min": 500, "max": 2000, "level": 0, "color": (140, 240, 140)},
+    {"name": "Hi-Mid", "min": 2000, "max": 4000, "level": 0, "color": (160, 255, 160)},
+    {"name": "Presence", "min": 4000, "max": 6000, "level": 0, "color": (240, 200, 120)},
+    {"name": "Brilliance", "min": 6000, "max": 20000, "level": 0, "color": (240, 150, 80)}
+]
+
+def get_log_bands(sample_rate, fft_size, num_bands, min_f, max_f):
+    freqs = np.fft.rfftfreq(fft_size, 1.0 / sample_rate)
+    # Ensure min_f is positive for logspace
+    safe_min_f = max(1.0, min_f)
+    band_edges = np.logspace(np.log10(safe_min_f), np.log10(max_f), num_bands + 1)
+    bands = []
+    for i in range(num_bands):
+        indices = np.where((freqs >= band_edges[i]) & (freqs < band_edges[i+1]))[0]
+        bands.append(indices)
+    return bands, band_edges
+
+band_indices, band_edges = get_log_bands(SAMPLE_RATE, CHUNK, NUM_BANDS, MIN_FREQ, MAX_FREQ)
+bar_heights = np.zeros(NUM_BANDS)
+peak_heights = np.zeros(NUM_BANDS)
+
+# Visual Tilt Gain: +3dB/octave tilt for the ultra-wide range
+visual_tilt = np.linspace(0, 24, NUM_BANDS)
+
 
 def signal_handler(sig, frame):
     global running
@@ -333,29 +375,114 @@ while running:
                 last_displayed_dbz = db_z
                 last_ui_update_time = current_time
 
-            # Spectrum analyzer (basic FFT for visuals, unweighted for full bass visibility)
-            fft_data_vis = np.abs(fft_complex)[:100]  # Keep the lower/mid frequencies
+            # --- SPECTRUM VISUALIZATION BLOCK ---
+            fft_mag = np.abs(fft_complex)
+            current_bar_targets = np.zeros(NUM_BANDS)
 
-            # Draw the spectrum analyzer
-            num_bars = len(fft_data_vis)
-            bar_width = screen.get_width() // num_bars
+            for i, indices in enumerate(band_indices):
+                if len(indices) > 0:
+                    # Get the average magnitude for this band
+                    mag = np.mean(fft_mag[indices])
+                    # Visual tilt: +4.5dB per octave approx (18dB over ~4 octaves of interest)
+                    db_val = 20 * np.log10(max(1e-9, mag)) + CALIBRATION_OFFSET + visual_tilt[i]
+                    
+                    # Normalize to 0.0 - 1.0 range (more sensitive: 20dB to 80dB)
+                    norm_val = (db_val - 20) / (80 - 20)
+                    current_bar_targets[i] = np.clip(norm_val, 0, 1)
 
-            for i, val in enumerate(fft_data_vis):
-                # Scale the value vertically
-                h = min(screen.get_height() - 150, int(val / 500))
-                # Draw a white bar (e-ink aesthetic)
-                pygame.draw.rect(
-                    screen,
-                    (220, 220, 220),
-                    (i * bar_width, screen.get_height() - h, bar_width - 5, h),
-                )
+            # Apply visual smoothing (fast rise, slow decay)
+            for i in range(NUM_BANDS):
+                if current_bar_targets[i] > bar_heights[i]:
+                    bar_heights[i] = bar_heights[i] + 0.7 * (current_bar_targets[i] - bar_heights[i]) # Faster rise
+                else:
+                    bar_heights[i] *= SMOOTHING_FACTOR      # Exponential decay
+
+                # Peak handling
+                if bar_heights[i] > peak_heights[i]:
+                    peak_heights[i] = bar_heights[i]
+                else:
+                    peak_heights[i] *= PEAK_DECAY
+
+            # Draw the spectrum analyzer (Centered and refined)
+            analyzer_height = screen.get_height() // 2 - 50
+            analyzer_y_bottom = screen.get_height() - 120
+            bar_spacing = 6
+            total_bars_width = screen.get_width() - 240
+            bar_width = (total_bars_width // NUM_BANDS) - bar_spacing
+            start_x = (screen.get_width() - (NUM_BANDS * (bar_width + bar_spacing))) // 2
+
+            for i in range(NUM_BANDS):
+                h = int(bar_heights[i] * analyzer_height)
+                ph = int(peak_heights[i] * analyzer_height)
+                
+                x = start_x + i * (bar_width + bar_spacing)
+                
+                # Premium Color Palette: Gradient from Slate to Cyan/Mint
+                # Bass (left) is more blue/slate, Treble (right) is more mint/white
+                r = int(100 + 100 * (i / NUM_BANDS))
+                g = int(180 + 75 * (i / NUM_BANDS))
+                b = int(220 - 50 * (i / NUM_BANDS))
+                
+                # Adjust brightness by intensity
+                intensity = 0.6 + 0.4 * bar_heights[i]
+                bar_color = (int(r * intensity), int(g * intensity), int(b * intensity))
+                
+                # Draw bar with rounded corners
+                if h > 4:
+                    pygame.draw.rect(screen, bar_color, (x, analyzer_y_bottom - h, bar_width, h), border_radius=4)
+                
+                # Draw peak indicator (floating)
+                if ph > 5:
+                    peak_color = (255, 255, 255) # Pure white peak for clarity
+                    pygame.draw.rect(screen, peak_color, (x, analyzer_y_bottom - ph - 2, bar_width, 2), border_radius=1)
+
+            # Draw labels for key frequencies
+            key_freqs = [60, 250, 1000, 4000, 16000]
+            for f in key_freqs:
+                if f >= MIN_FREQ and f <= MAX_FREQ:
+                    pos_idx = NUM_BANDS * (np.log10(f) - np.log10(max(1.0, MIN_FREQ))) / (np.log10(MAX_FREQ) - np.log10(max(1.0, MIN_FREQ)))
+                    label_x = start_x + pos_idx * (bar_width + bar_spacing)
+                    
+                    label_text = f"{int(f/1000)}k" if f >= 1000 else f"{f}"
+                    label_surface = font_tiny.render(label_text, True, (130, 150, 130))
+                    label_rect = label_surface.get_rect(midtop=(label_x, analyzer_y_bottom + 15))
+                    screen.blit(label_surface, label_rect)
+                    pygame.draw.line(screen, (60, 80, 60), (label_x, analyzer_y_bottom + 2), (label_x, analyzer_y_bottom + 10), 1)
+
+            # --- MULTI-LEVEL RANGE LABELS ---
+            for rng in FREQ_RANGES:
+                if rng["max"] >= MIN_FREQ and rng["min"] <= MAX_FREQ:
+                    # Calculate pixel positions for start/end
+                    f_start = max(rng["min"], MIN_FREQ)
+                    f_end = min(rng["max"], MAX_FREQ)
+                    
+                    p_start = NUM_BANDS * (np.log10(f_start) - np.log10(max(1.0, MIN_FREQ))) / (np.log10(MAX_FREQ) - np.log10(max(1.0, MIN_FREQ)))
+                    p_end = NUM_BANDS * (np.log10(f_end) - np.log10(max(1.0, MIN_FREQ))) / (np.log10(MAX_FREQ) - np.log10(max(1.0, MIN_FREQ)))
+                    
+                    x_start = start_x + p_start * (bar_width + bar_spacing)
+                    x_end = start_x + p_end * (bar_width + bar_spacing)
+                    
+                    level_y = analyzer_y_bottom + 50 + (rng["level"] * 40)
+                    
+                    # Draw a colored line for the range
+                    line_color = rng["color"]
+                    pygame.draw.line(screen, line_color, (x_start + 2, level_y), (x_end - 2, level_y), 2)
+                    pygame.draw.line(screen, line_color, (x_start + 2, level_y - 5), (x_start + 2, level_y + 5), 1)
+                    pygame.draw.line(screen, line_color, (x_end - 2, level_y - 5), (x_end - 2, level_y + 5), 1)
+                    
+                    # Render Range Name
+                    range_surface = font_tiny.render(rng["name"], True, line_color)
+                    range_rect = range_surface.get_rect(center=((x_start + x_end) // 2, level_y + 15))
+                    # Only draw if there is space
+                    if x_end - x_start > range_rect.width:
+                        screen.blit(range_surface, range_rect)
 
             # Determine color based on threshold (Evaluate using dBA, professional standard)
-            text_color = (144, 238, 144)  # Light Green
+            text_color = (180, 255, 180)  # Brighter Green
             if last_displayed_dba >= THRESHOLD_ERROR:
-                text_color = (255, 0, 0)  # Red
+                text_color = (255, 80, 80)   # Vivid Red
             elif last_displayed_dba >= THRESHOLD_WARNING:
-                text_color = (255, 165, 0)  # Orange
+                text_color = (255, 180, 50)  # Vivid Orange
 
             # Render dBA text (Large)
             dba_text = font_extra_large.render(
