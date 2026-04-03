@@ -854,9 +854,10 @@ def _ensure_labwc():
     )
     logging.info(f"Started persistent labwc compositor (PID {_labwc_process.pid}).")
 
-    # Wait for labwc's Wayland socket to become reachable (max ~5s, Pi Zero 2 can be slow).
-    # Stale sockets were cleaned above, so any reachable socket is from our new labwc.
-    for attempt in range(50):
+    # Wait for labwc's Wayland socket to become reachable (max ~10s).
+    # First cold-start on Pi Zero 2 can take 6-8s (shared libs, DRM init, shader compile).
+    # Subsequent starts are ~2s thanks to warm page cache.
+    for attempt in range(100):
         if _labwc_process.poll() is not None:
             rc = _labwc_process.returncode
             _labwc_process = None
@@ -875,7 +876,7 @@ def _ensure_labwc():
             logging.debug(f"labwc socket poll #{attempt+1}: still waiting...")
         time.sleep(0.1)
 
-    raise RuntimeError("labwc started but no Wayland socket detected within 5s")
+    raise RuntimeError("labwc started but no Wayland socket detected within 10s")
 
 
 def _labwc_hide_cursor():
@@ -956,13 +957,29 @@ def start_mode(mode):
         set_display_power(False)
         return
 
-    # 3. Only turn display ON if coming from "off" (it's already on for mode-to-mode switches).
+    # 3. Start display power ON and labwc compositor IN PARALLEL.
+    #    On Pi Zero 2 cold boot, labwc takes 6-8s to create its Wayland socket.
+    #    Overlapping with display power-on (~3s) hides most of that latency.
     display_thread = None
     if previous_mode == "off":
         display_thread = threading.Thread(target=set_display_power, args=(True,), daemon=True)
         display_thread.start()
 
-    # 4. Resolve mode script.
+    setup_display_env()
+    labwc_thread = None
+    _labwc_start_error = [None]  # Mutable container for thread result
+    if _labwc_process is not None or (
+        not os.environ.get("WAYLAND_DISPLAY") and not os.environ.get("DISPLAY")
+    ):
+        def _start_labwc_parallel():
+            try:
+                _ensure_labwc()
+            except Exception as e:
+                _labwc_start_error[0] = e
+        labwc_thread = threading.Thread(target=_start_labwc_parallel, daemon=True)
+        labwc_thread.start()
+
+    # 4. Resolve mode script (runs while display + labwc warm up).
     modes_dir = os.path.join(os.path.dirname(__file__), "modes")
     py_script = os.path.join(modes_dir, f"{mode}_mode.py")
     sh_script = os.path.join(modes_dir, f"{mode}_mode.sh")
@@ -982,11 +999,13 @@ def start_mode(mode):
             mqtt_client.publish(MQTT_STATE_TOPIC, current_mode, retain=True)
         return
 
-    # Wait for display power ON if we started it
+    # 5. Wait for display power ON and labwc to be ready.
     if display_thread:
         display_thread.join(timeout=4.0)
+    if labwc_thread:
+        labwc_thread.join(timeout=12.0)
 
-    # 5. Prepare mode-specific environment variables (always, for all launch paths).
+    # 6. Prepare mode-specific environment variables.
     env = os.environ.copy()
     audio_idx = _discover_audio_device()
     env["SMARTFRAME_AUDIO_DEVICE"] = str(
@@ -998,22 +1017,14 @@ def start_mode(mode):
             "url", "http://localhost:8080"
         )
 
-    # 6. Ensure a display session exists.
-    setup_display_env()
-
-    # Always verify/reuse our persistent labwc if it's running, OR start one if no display exists.
-    # Without this, mode-to-mode switches (e.g. audio→mirror) would skip the health check
-    # because WAYLAND_DISPLAY is still set from the previous labwc session.
-    if _labwc_process is not None or (
-        not os.environ.get("WAYLAND_DISPLAY") and not os.environ.get("DISPLAY")
-    ):
-        try:
-            wayland_display = _ensure_labwc()
-            env["WAYLAND_DISPLAY"] = wayland_display
-        except Exception as e:
+    # Apply labwc result (sets WAYLAND_DISPLAY for the mode process).
+    if labwc_thread:
+        if _labwc_start_error[0]:
             logging.warning(
-                f"Persistent labwc session failed ({e}). Attempting direct launch."
+                f"Persistent labwc session failed ({_labwc_start_error[0]}). Attempting direct launch."
             )
+        elif _labwc_wayland_display:
+            env["WAYLAND_DISPLAY"] = _labwc_wayland_display
 
     # 7. Launch the mode process.
     logging.info(f"Launching '{mode}' mode (cmd: {' '.join(base_cmd)}).")
