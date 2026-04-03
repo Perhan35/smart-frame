@@ -51,8 +51,14 @@ _working_methods = {
     'hardware': []    # List of low-level methods (vcgencmd, fb0, etc) that work
 }
 
-def setup_display_env():
+_display_env_detected = False
+
+def setup_display_env(force=False):
     """Detect and validate the current display environment (Wayland/X11)."""
+    global _display_env_detected
+    if _display_env_detected and not force:
+        return
+
     uid = os.getuid()
     
     def is_wayland_reachable(display_name):
@@ -99,12 +105,16 @@ def setup_display_env():
             if is_wayland_reachable(name):
                 os.environ['WAYLAND_DISPLAY'] = name
                 logging.info(f"Auto-detected Wayland: {name}")
+                _display_env_detected = True
                 return
         
         # Check standard X11 socket
         if is_x11_active() and os.path.exists('/tmp/.X11-unix/X0'):
             os.environ['DISPLAY'] = ':0'
             logging.info("Auto-detected X11: :0")
+            _display_env_detected = True
+
+    _display_env_detected = True
 
 def _get_hdmi_output_name():
     # Cache the output name to avoid calling wlr-randr every time
@@ -227,6 +237,9 @@ def stop_current_mode():
             del os.environ['WAYLAND_DISPLAY']
         if 'DISPLAY' in os.environ:
             del os.environ['DISPLAY']
+        
+        global _display_env_detected
+        _display_env_detected = False # Allow re-detection for the next mode
 
 def get_available_modes():
     modes = ['off']
@@ -319,6 +332,10 @@ def start_mode(mode):
                 env['XDG_CONFIG_HOME'] = labwc_config_dir
                 env['XCURSOR_SIZE'] = '0'
                 env['COG_PLATFORM_FDO_SHOW_CURSOR'] = '0'
+                # Pass MIRROR_URL and other config to modes to avoid them re-parsing the large config.yaml
+                env['MIRROR_URL'] = config.get('magic_mirror', {}).get('url', 'http://localhost:8080')
+                env['SMARTFRAME_AUDIO_DEVICE'] = str(config.get('audio', {}).get('device_index', ''))
+                
                 final_cmd = ['labwc', '-s', cmd_str]
                 logging.info(f"Wrapping mode '{mode}' in a managed Wayland session (labwc) with isolated XDG_CONFIG_HOME.")
                 current_process = subprocess.Popen(final_cmd, env=env, start_new_session=True, stdout=None, stderr=None)

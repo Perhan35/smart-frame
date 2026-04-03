@@ -11,17 +11,28 @@ from contextlib import contextmanager
 
 # Load configuration
 config_path = os.path.join(os.path.dirname(__file__), "..", "config.yaml")
-try:
-    with open(config_path, "r") as file:
-        config = yaml.safe_load(file)
-except Exception:
-    config = {}
 
-audio_config = config.get("audio", {})
-DEVICE_INDEX = audio_config.get("device_index")
-THRESHOLD_WARNING = audio_config.get("threshold_db_warning", 60)
-THRESHOLD_ERROR = audio_config.get("threshold_db_error", 85)
-CALIBRATION_OFFSET = audio_config.get("calibration_offset_db", 0)
+# Config with env-var fallbacks (passed from orchestrator for speed)
+DEVICE_INDEX = None
+THRESHOLD_WARNING = 60
+THRESHOLD_ERROR = 85
+CALIBRATION_OFFSET = 0
+
+try:
+    if os.path.exists(config_path):
+        with open(config_path, "r") as file:
+            config = yaml.safe_load(file)
+            audio_config = config.get("audio", {})
+            THRESHOLD_WARNING = audio_config.get("threshold_db_warning", 60)
+            THRESHOLD_ERROR = audio_config.get("threshold_db_error", 85)
+            CALIBRATION_OFFSET = audio_config.get("calibration_offset_db", 0)
+            DEVICE_INDEX = audio_config.get("device_index")
+except Exception:
+    pass
+
+DEVICE_INDEX_ENV = os.environ.get('SMARTFRAME_AUDIO_DEVICE')
+if DEVICE_INDEX_ENV and DEVICE_INDEX_ENV != 'None' and DEVICE_INDEX_ENV != '':
+    DEVICE_INDEX = int(DEVICE_INDEX_ENV)
 
 # Audio Configuration
 CHUNK = 2048
@@ -60,14 +71,28 @@ if not os.environ.get("DISPLAY") and not os.environ.get("WAYLAND_DISPLAY"):
     if not os.environ.get("SDL_DRM_DEVICE"):
         os.environ["SDL_DRM_DEVICE"] = "/dev/dri/card0"
 
-# Robust mouse hiding for various SDL/Wayland/X11 backends
+# Robust mouse hiding and GPU acceleration for various SDL/Wayland/X11 backends
 os.environ["SDL_VIDEO_WAYLAND_HIDECURSOR"] = "1"
 os.environ["SDL_MOUSE_RELATIVE"] = "1"
 os.environ["XCURSOR_SIZE"] = "0"
 os.environ["COG_PLATFORM_FDO_SHOW_CURSOR"] = "0"
 
+# Detect GPU availability for SDL2
+HAS_GPU = os.path.exists("/dev/dri/card0") or os.path.exists("/dev/dri/renderD128")
+
+if HAS_GPU:
+    # Force Hardware Acceleration in SDL2 (Very useful for Pi Zero 2 WH)
+    os.environ["SDL_RENDER_DRIVER"] = "opengles2"
+    os.environ["SDL_HINT_RENDER_DRIVER"] = "opengles2"
+    os.environ["SDL_HINT_RENDER_SCALE_QUALITY"] = "1"  # Linear scaling for better visuals on GPU
+    os.environ["SDL_VIDEO_GLES2"] = "1"
+    print("GPU detected: Enabling SDL2 GLES2 hardware acceleration.")
+else:
+    print("No GPU detected: Falling back to software/standard rendering.")
+
 try:
-    screen = pygame.display.set_mode((1920, 1080), pygame.FULLSCREEN)
+    # Use DOUBLEBUF and HWSURFACE (hints to SDL2 to use the GPU/video memory if available)
+    screen = pygame.display.set_mode((1920, 1080), pygame.FULLSCREEN | pygame.DOUBLEBUF | pygame.HWSURFACE)
 except pygame.error:
     # Final fallback to dummy
     try:
@@ -253,27 +278,29 @@ while running:
             else:
                 data = data.astype(np.float32)
 
-            # --- IMPROVED DSP BLOCK ---
-            # 1. DC Offset Removal (Mean Subtraction)
-            data -= np.mean(data)
-
-            # 2. Software High-Pass Filter (Simple 100Hz suppression)
-            # This helps match the Watch which likely ignores room rumble
-            # and it will fix the "51 dBZ in silence" issue.
+            # --- AUDIO DSP BLOCK (REVERTED TO TIME-DOMAIN FOR USER PREFERENCE) ---
+            # 1. Forward FFT
             fft_complex = np.fft.rfft(data)
             freqs = np.fft.rfftfreq(len(data), 1.0 / SAMPLE_RATE)
-            fft_complex[freqs < 100] = 0  # Kill everything below 100Hz
-
+            
+            # 2. DC/VLF Removal (High-Pass ~100Hz)
+            fft_complex[freqs < 100] = 0
+            
             # 3. Z-weighted (Raw) RMS
+            # Time-domain approach (Original)
             data_clean = np.fft.irfft(fft_complex)
             z_rms = np.sqrt(np.mean(data_clean**2))
 
-            # 4. A-Weighted RMS (using our pre-calculated gains)
-            # a_gains is now calculated once at the top of the script
-            # because CHUNK is constant again.
+            # [Future reference: Frequency-domain RMS for Zero 2 optimization]
+            # z_rms = np.sqrt(np.sum(np.abs(fft_complex)**2) / (len(data)**2))
+
+            # 4. A-Weighted RMS (Original)
             fft_aw = fft_complex * a_gains
             data_aw = np.fft.irfft(fft_aw)
             a_rms = np.sqrt(np.mean(data_aw**2))
+
+            # [Future reference: Frequency-domain A-RMS for Zero 2 optimization]
+            # a_rms = np.sqrt(np.sum(np.abs(fft_aw)**2) / (len(data)**2))
 
             # Fast Integration (EMA)
             if ema_rms_z == 0:
@@ -368,8 +395,10 @@ while running:
         screen.blit(error_text, text_rect)
 
     pygame.display.flip()
-    # Limit framerate: screen can easily handle 60 FPS, but 30 or 60 is perfectly fine
+    # Limit framerate: 60 FPS (Original) for smooth animations
     clock.tick(60)
+    # [Future reference: Lower to 30 to save 50% CPU cycles on Pi Zero 2 if stuttering occurs]
+    # clock.tick(30)
 
 if stream:
     stream.stop_stream()

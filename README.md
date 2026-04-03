@@ -34,14 +34,58 @@ To connect the INMP441 I2S microphone to your Raspberry Pi, follow the wiring ta
 
 ## Linux Prerequisites (Raspberry Pi OS)
 
-1. Enable the I2S microphone modules in `/boot/config.txt` (or `/boot/firmware/config.txt`):
+1. Enable the I2S microphone modules in `/boot/firmware/config.txt`:
 
 ```ini
 dtparam=i2s=on
 dtoverlay=googlevoicehat-soundcard
 ```
 
+1. **Enable GPU Acceleration**: Ensure the KMS overlay is active to leverage the VideoCore GPU for hardware-accelerated rendering:
+
+```ini
+dtoverlay=vc4-kms-v3d
+gpu_mem=128
+```
+
+3. **Configure Screen**: Adapt to your needs:
+
+```ini
+# Forces HDMI and resolution 1080p 60Hz
+hdmi_force_hotplug=1
+hdmi_group=2
+hdmi_mode=82
+```
+
+or force the kernel by adding into `/boot/firmware/cmdline.txt`:
+
+```ini
+video=HDMI-A-1:1920x1080M@60
+```
+
 *(a reboot of the Raspberry Pi is required)*.
+
+## Performance Optimization (Pi Zero 2 WH)
+
+The Pi Zero 2 WH has limited RAM (512MB). To prevent Chromium from crashing and maintain a "snappy" UI, it is highly recommended to increase the swap size to 1.5GB using native Linux tools:
+
+```bash
+# 1. Disable a-la-carte swap scripts (if any)
+sudo apt remove -y rpi-swap dphys-swapfile systemd-zram-generator
+
+# 2. Create a permanent 1.5GB swap file
+sudo swapoff -a
+sudo fallocate -l 1.5G /swapfile
+sudo chmod 600 /swapfile
+sudo mkswap /swapfile
+sudo swapon /swapfile
+
+# 3. Make it permanent on boot:
+# Open /etc/fstab and add this line at the bottom:
+/swapfile none swap sw 0 0
+```
+
+SmartFrame automatically detects the GPU state and will enable hardware-accelerated 2D canvas and GLES2 rendering if available.
 
 ## SmartFrame Installation
 

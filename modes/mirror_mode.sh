@@ -10,8 +10,8 @@ CONFIG_FILE="$DIR/../config.yaml"
 
 if [ -z "$MIRROR_URL" ]; then
     if [ -f "$CONFIG_FILE" ]; then
-        # Use python only as a fallback
-        MIRROR_URL=$(python3 -c "import yaml; print(yaml.safe_load(open('$CONFIG_FILE')).get('magic_mirror', {}).get('url', ''))" 2>/dev/null)
+        # Fast shell-based fallback for simple YAML (avoids 1.5s python overhead on Pi Zero 2)
+        MIRROR_URL=$(grep 'url:' "$CONFIG_FILE" | head -n 1 | awk '{print $2}' | tr -d '"'\'' ')
     fi
 fi
 
@@ -51,12 +51,21 @@ if [ "$BROWSER_TYPE" = "chromium" ]; then
     PROFILE_DIR="$DIR/../.chromium_profile"
     mkdir -p "$PROFILE_DIR"
 
+    # Detect GPU availability (VideoCore / KMS)
+    HAS_GPU=0
+    if [ -c /dev/dri/card0 ] || [ -c /dev/dri/renderD128 ]; then
+        HAS_GPU=1
+    fi
+
     # --no-sandbox: fix "Failed global descriptor lookup" on Pi kiosk
     # --use-gl=egl: Resolve "eglCreateContext ES 3.0 failed" errors by forcing EGL
-    # --disable-client-side-phishing-detection: skip the "URL to scan" enterprise check delay
-    # --no-first-run --no-default-browser-check: skip initial setup logic
-    # --disable-features=...: Thoroughly disabling background bloat, scans, and cloud services (GCM, SafeBrowsing, etc.)
-    CHROME_FLAGS="--no-sandbox --noerrdialogs --disable-infobars --kiosk --hide-scrollbars --password-store=basic --check-for-update-interval=31536000 --no-memcheck --enable-low-end-device-mode --disable-site-isolation-trials --test-type --no-pings --disable-notifications --disable-sync --autoplay-policy=no-user-gesture-required --disable-background-networking --disable-component-update --disable-default-apps --disable-domain-reliability --disable-extensions --disable-client-side-phishing-detection --no-first-run --no-default-browser-check --disable-cloud-import --disable-breakpad --metrics-recording-only --disable-gcm-extension --disable-safe-browsing-extension-api --safebrowsing-disable-auto-update --safebrowsing-disable-download-protection --disable-features=Translate,OptimizationHints,MediaRouter,DialMediaRouteProvider,PrintPreview,OnDeviceModel,OptimizationGuideModelExecution,WebGPU,SkiaGraphite,WebRtcHideLocalIpsWithMdns,SafeBrowsing,GCM,OptimizationGuide,EnterpriseDataProtectionAnalysis --enable-gpu-rasterization --enable-zero-copy --use-gl=egl --ignore-certificate-errors --allow-running-insecure-content --remote-allow-origins=* --user-data-dir=$PROFILE_DIR --memory-pressure-thresholds=1,2 --js-flags='--max-old-space-size=128 --stack-size=1024' --disable-smooth-scrolling"
+    CHROME_FLAGS="--no-sandbox --noerrdialogs --disable-infobars --kiosk --hide-scrollbars --password-store=basic --check-for-update-interval=31536000 --no-memcheck --enable-low-end-device-mode --disable-site-isolation-trials --test-type --no-pings --disable-notifications --disable-sync --autoplay-policy=no-user-gesture-required --disable-background-networking --disable-component-update --disable-default-apps --disable-domain-reliability --disable-extensions --disable-client-side-phishing-detection --no-first-run --no-default-browser-check --disable-cloud-import --disable-breakpad --metrics-recording-only --disable-gcm-extension --disable-safe-browsing-extension-api --safebrowsing-disable-auto-update --safebrowsing-disable-download-protection --disable-features=Translate,OptimizationHints,MediaRouter,DialMediaRouteProvider,PrintPreview,OnDeviceModel,OptimizationGuideModelExecution,WebGPU,SkiaGraphite,WebRtcHideLocalIpsWithMdns,SafeBrowsing,GCM,OptimizationGuide,EnterpriseDataProtectionAnalysis --enable-zero-copy --use-gl=egl --ignore-certificate-errors --allow-running-insecure-content --remote-allow-origins=* --user-data-dir=$PROFILE_DIR --memory-pressure-thresholds=1,2 --js-flags='--max-old-space-size=128 --stack-size=1024' --disable-smooth-scrolling"
+
+    # Add hardware acceleration flags only if GPU is present
+    if [ "$HAS_GPU" = "1" ]; then
+        CHROME_FLAGS="$CHROME_FLAGS --enable-gpu-rasterization --ignore-gpu-blocklist --enable-accelerated-2d-canvas --enable-native-gpu-memory-buffers"
+        echo "GPU detected: Enabling hardware acceleration flags."
+    fi
 
     # Conditional logging for debugging
     if [ "$SMARTFRAME_DEBUG" = "1" ]; then
@@ -64,8 +73,6 @@ if [ "$BROWSER_TYPE" = "chromium" ]; then
     fi
     
     # Priority: Mirror Mode is the primary focus. Lower nice value (higher priority) during startup.
-    # We use nice -n 0 (default) or even -5 if we want it to grab resources during load.
-    # ionice -c 2 -n 4: Balanced I/O priority.
     LAUNCH_WRAPPER="nice -n 0 ionice -c 2 -n 4"
     FULL_CMD="$LAUNCH_WRAPPER $BROWSER_CMD $CHROME_FLAGS"
 
@@ -78,7 +85,13 @@ else
     export XDG_DATA_HOME="/tmp/cog-data-$USER-$RANDOM"
     export XDG_CACHE_HOME="/tmp/cog-cache-$USER-$RANDOM"
     mkdir -p "$XDG_DATA_HOME" "$XDG_CACHE_HOME"
-    export WPE_G_P_R_S_M_ALLOW_FORCE_GL=1
+    
+    # Check GPU for Cog
+    if [ -c /dev/dri/card0 ]; then
+        export WPE_G_P_R_S_M_ALLOW_FORCE_GL=1
+        export WPE_G_P_R_S_M_ALLOW_EGL_GLES=1
+    fi
+    export COG_PLATFORM_FDO_SHOW_CURSOR=0
     
     LAUNCH_WRAPPER="nice -n 15 ionice -c 3"
     FULL_CMD="$LAUNCH_WRAPPER $BROWSER_CMD"
