@@ -30,12 +30,12 @@ try:
 except Exception:
     pass
 
-DEVICE_INDEX_ENV = os.environ.get('SMARTFRAME_AUDIO_DEVICE')
-if DEVICE_INDEX_ENV and DEVICE_INDEX_ENV != 'None' and DEVICE_INDEX_ENV != '':
+DEVICE_INDEX_ENV = os.environ.get("SMARTFRAME_AUDIO_DEVICE")
+if DEVICE_INDEX_ENV and DEVICE_INDEX_ENV != "None" and DEVICE_INDEX_ENV != "":
     DEVICE_INDEX = int(DEVICE_INDEX_ENV)
 
 # Audio Configuration
-CHUNK = 8192             # High-precision 8k FFT for maximum visual resolution
+CHUNK = 8192  # High-precision 8k FFT for maximum visual resolution
 FORMAT = pyaudio.paInt16
 CHANNELS = 1
 
@@ -84,7 +84,9 @@ if HAS_GPU:
     # Force Hardware Acceleration in SDL2 (Very useful for Pi Zero 2 WH)
     os.environ["SDL_RENDER_DRIVER"] = "opengles2"
     os.environ["SDL_HINT_RENDER_DRIVER"] = "opengles2"
-    os.environ["SDL_HINT_RENDER_SCALE_QUALITY"] = "1"  # Linear scaling for better visuals on GPU
+    os.environ["SDL_HINT_RENDER_SCALE_QUALITY"] = (
+        "1"  # Linear scaling for better visuals on GPU
+    )
     os.environ["SDL_VIDEO_GLES2"] = "1"
     print("GPU detected: Enabling SDL2 GLES2 hardware acceleration.")
 else:
@@ -92,7 +94,9 @@ else:
 
 try:
     # Use DOUBLEBUF and HWSURFACE (hints to SDL2 to use the GPU/video memory if available)
-    screen = pygame.display.set_mode((1920, 1080), pygame.FULLSCREEN | pygame.DOUBLEBUF | pygame.HWSURFACE)
+    screen = pygame.display.set_mode(
+        (1920, 1080), pygame.FULLSCREEN | pygame.DOUBLEBUF | pygame.HWSURFACE
+    )
 except pygame.error:
     # Final fallback to dummy
     try:
@@ -248,34 +252,50 @@ ema_rms_a = 0.0
 ema_rms_z = 0.0
 
 # --- SPECTRUM ANALYZER CONFIGURATION ---
-NUM_BANDS = 96           
+NUM_BANDS = 96
 MIN_FREQ = 25
 MAX_FREQ = 24000
-MIN_DB = 50              # Lower visual floor for sensitivity
-MAX_DB = 130             # Substantially more headroom (Decibel X style)
-SMOOTHING_FACTOR = 0.70  
-PEAK_GRAVITY = 0.035
-PEAK_MAX_SPEED = 0.12
-NOISE_GATE_LOW = 0.08    # Stricter gate for lows to remove baseline jitter
-NOISE_GATE_HIGH = 0.03   # Standard gate for highs
+MIN_DB = 55
+MAX_DB = 135  # Balanced range for high-energy music
+SMOOTHING_FACTOR = 0.72
+PEAK_GRAVITY = 0.04
+PEAK_MAX_SPEED = 0.15
+NOISE_GATE_LOW = 0.12  # Stricter gate to remove baseline mic noise
+NOISE_GATE_MID = 0.08  # Gate for mid-ranges
+NOISE_GATE_HIGH = 0.05  # Surgical floor for clarity
 
-# Professional Slope Setting: 2.0dB/octave matches modern reference curves
-SLOPE_DB_PER_OCTAVE = 2.0 
+# Professional Slope Setting: Increased to 4.0dB for better visual high-end energy
+SLOPE_DB_PER_OCTAVE = 4.0
+HIGH_FREQ_BOOST = (
+    6.0  # Additional +6dB for frequencies above 10kHz (Compensate mic roll-off)
+)
 
 # Frequency Range Definitions (Cleaned up for 25Hz-24kHz)
 FREQ_RANGES = [
     {"name": "BASS", "min": 25, "max": 250, "level": 1, "color": (100, 150, 255)},
     {"name": "MIDS", "min": 250, "max": 4000, "level": 1, "color": (150, 255, 150)},
     {"name": "TREBLE", "min": 4000, "max": 24000, "level": 1, "color": (255, 150, 100)},
-    
     {"name": "Sub", "min": 25, "max": 60, "level": 0, "color": (80, 120, 220)},
     {"name": "Low", "min": 60, "max": 250, "level": 0, "color": (100, 140, 240)},
     {"name": "Low-Mid", "min": 250, "max": 500, "level": 0, "color": (120, 220, 120)},
     {"name": "Mid", "min": 500, "max": 2000, "level": 0, "color": (140, 240, 140)},
     {"name": "Hi-Mid", "min": 2000, "max": 4000, "level": 0, "color": (160, 255, 160)},
-    {"name": "Presence", "min": 4000, "max": 6000, "level": 0, "color": (240, 200, 120)},
-    {"name": "Brilliance", "min": 6000, "max": 24000, "level": 0, "color": (240, 150, 80)}
+    {
+        "name": "Presence",
+        "min": 4000,
+        "max": 6000,
+        "level": 0,
+        "color": (240, 200, 120),
+    },
+    {
+        "name": "Brilliance",
+        "min": 6000,
+        "max": 24000,
+        "level": 0,
+        "color": (240, 150, 80),
+    },
 ]
+
 
 def get_log_bands(sample_rate, fft_size, num_bands, min_f, max_f):
     freqs = np.fft.rfftfreq(fft_size, 1.0 / sample_rate)
@@ -285,17 +305,22 @@ def get_log_bands(sample_rate, fft_size, num_bands, min_f, max_f):
     bands = []
     band_centers = []
     for i in range(num_bands):
-        indices = np.where((freqs >= band_edges[i]) & (freqs < band_edges[i+1]))[0]
+        indices = np.where((freqs >= band_edges[i]) & (freqs < band_edges[i + 1]))[0]
         # Robustness: If range is too narrow for this FFT resolution, take the nearest bin
         if len(indices) == 0:
-            nearest_idx = np.argmin(np.abs(freqs - (band_edges[i] + band_edges[i+1])/2))
+            nearest_idx = np.argmin(
+                np.abs(freqs - (band_edges[i] + band_edges[i + 1]) / 2)
+            )
             indices = np.array([nearest_idx])
-            
+
         bands.append(indices)
-        band_centers.append(np.sqrt(band_edges[i] * band_edges[i+1]))
+        band_centers.append(np.sqrt(band_edges[i] * band_edges[i + 1]))
     return bands, band_edges, band_centers
 
-band_indices, band_edges, band_centers = get_log_bands(SAMPLE_RATE, CHUNK, NUM_BANDS, MIN_FREQ, MAX_FREQ)
+
+band_indices, band_edges, band_centers = get_log_bands(
+    SAMPLE_RATE, CHUNK, NUM_BANDS, MIN_FREQ, MAX_FREQ
+)
 bar_heights = np.zeros(NUM_BANDS)
 peak_heights = np.zeros(NUM_BANDS)
 
@@ -321,6 +346,42 @@ def signal_handler(sig, frame):
 signal.signal(signal.SIGTERM, signal_handler)
 signal.signal(signal.SIGINT, signal_handler)
 
+# --- STATS MONITORING ---
+last_stats_update = 0
+cpu_usage = 0
+cpu_temp = 0
+last_cpu_total = 0
+last_cpu_idle = 0
+
+def get_cpu_stats():
+    """Fetch CPU temperature and raw CPU time data for usage calculation."""
+    temp = 0.0
+    try:
+        # Raspberry Pi temperature path
+        if os.path.exists("/sys/class/thermal/thermal_zone0/temp"):
+            with open("/sys/class/thermal/thermal_zone0/temp", "r") as f:
+                temp = float(f.read()) / 1000.0
+    except (IOError, ValueError):
+        pass
+
+    total = 0
+    idle = 0
+    try:
+        # Linux CPU stats path
+        if os.path.exists("/proc/stat"):
+            with open("/proc/stat", "r") as f:
+                line = f.readline()
+                if line.startswith("cpu "):
+                    parts = line.split()
+                    # times: user, nice, system, idle, iowait, irq, softirq
+                    times = [float(p) for p in parts[1:8]]
+                    total = sum(times)
+                    idle = times[3]
+    except (IOError, ValueError, IndexError):
+        pass
+    
+    return temp, total, idle
+
 while running:
     for event in pygame.event.get():
         if event.type == pygame.QUIT:
@@ -329,6 +390,30 @@ while running:
             running = False
 
     screen.fill((0, 0, 0))  # Black background
+
+    # --- UPDATE CPU STATS (1Hz) ---
+    now = time.time()
+    if now - last_stats_update >= 1.0:
+        curr_temp, curr_total, curr_idle = get_cpu_stats()
+        if last_cpu_total > 0:
+            diff_total = curr_total - last_cpu_total
+            diff_idle = curr_idle - last_cpu_idle
+            if diff_total > 0:
+                cpu_usage = (1.0 - (diff_idle / diff_total)) * 100.0
+        
+        last_cpu_total = curr_total
+        last_cpu_idle = curr_idle
+        cpu_temp = curr_temp
+        last_stats_update = now
+
+    # Render minimalist CPU stats (top-left, discreet)
+    stats_color = (110, 130, 110)  # Subtle technical green
+    if cpu_temp > 75:
+        stats_color = (220, 80, 80) # Warning red for high temp
+    
+    stats_text = f"CPU {int(cpu_usage)}%  |  {cpu_temp:.1f}°C"
+    stats_surface = font_tiny.render(stats_text, True, stats_color)
+    screen.blit(stats_surface, (50, 50))
 
     if stream:
         try:
@@ -349,10 +434,10 @@ while running:
             # 1. Forward FFT (on windowed data)
             fft_complex = np.fft.rfft(windowed_data)
             freqs = np.fft.rfftfreq(len(data), 1.0 / SAMPLE_RATE)
-            
+
             # 2. DC/VLF Removal (Low-cut at 1Hz instead of 100Hz for user request)
             fft_complex[freqs < 1] = 0
-            
+
             # 3. Z-weighted (Raw) RMS
             # Time-domain approach (Original)
             data_clean = np.fft.irfft(fft_complex)
@@ -406,27 +491,38 @@ while running:
 
             for i, indices in enumerate(band_indices):
                 if len(indices) > 0:
-                    # Get the average magnitude for this band
+                    # Get average magnitude for this band
                     mag = np.mean(fft_mag[indices])
-                    # Calculate dB with tilt and normalize
-                    db_val = 20 * np.log10(max(1e-9, mag)) + CALIBRATION_OFFSET + visual_tilt[i]
-                    
-                    # Normalize to 0.0 - 1.0 range (Floor: 42dB, Ceiling: 105dB)
+                    # 1. Base dB
+                    db_val = 20 * np.log10(max(1e-9, mag)) + CALIBRATION_OFFSET
+                    # 2. Add visual tilt
+                    db_val += visual_tilt[i]
+                    # 3. Add HF Boost for air frequencies (>10kHz)
+                    if band_centers[i] > 10000:
+                        db_val += HIGH_FREQ_BOOST
+                    # Normalize to 52dB-132dB window
                     norm_val = (db_val - MIN_DB) / (MAX_DB - MIN_DB)
                     current_bar_targets[i] = np.clip(norm_val, 0, 1)
 
             # Apply visual smoothing (fast rise, slow decay)
             max_energy_idx = -1
             max_energy_val = -1
-            
+
             for i in range(NUM_BANDS):
                 if current_bar_targets[i] > bar_heights[i]:
-                    bar_heights[i] = current_bar_targets[i] # Instant rise
+                    bar_heights[i] = current_bar_targets[i]  # Instant rise
                 else:
-                    bar_heights[i] *= SMOOTHING_FACTOR      # Exponential decay
+                    bar_heights[i] *= SMOOTHING_FACTOR  # Exponential decay
 
                 # Dynamic Noise Gate logic: Frequency-dependent threshold
-                threshold = NOISE_GATE_LOW if band_centers[i] < 1000 else NOISE_GATE_HIGH
+                f_c = band_centers[i]
+                if f_c < 500:
+                    threshold = NOISE_GATE_LOW
+                elif f_c < 4000:
+                    threshold = NOISE_GATE_MID
+                else:
+                    threshold = NOISE_GATE_HIGH
+
                 if bar_heights[i] < threshold:
                     bar_heights[i] = 0
 
@@ -450,65 +546,76 @@ while running:
             analyzer_height = screen.get_height() // 2 + 80
             analyzer_y_bottom = screen.get_height() - 150
             bar_spacing = 5
-            total_bars_width = screen.get_width() - 100 
+            total_bars_width = screen.get_width() - 100
             bar_width = (total_bars_width // NUM_BANDS) - bar_spacing
-            start_x = (screen.get_width() - (NUM_BANDS * (bar_width + bar_spacing))) // 2
+            start_x = (
+                screen.get_width() - (NUM_BANDS * (bar_width + bar_spacing))
+            ) // 2
 
             for i in range(NUM_BANDS):
                 h = int(bar_heights[i] * analyzer_height)
                 ph = int(peak_pos[i] * analyzer_height)
-                
+
                 x = start_x + i * (bar_width + bar_spacing)
-                
-                # Transition from BASS (Blue) -> MIDS (Green) -> TREBLE (Orange/Red)
                 f_center = band_centers[i]
-                
-                # Check if this is the peak frequency (Decibel X style white highlight)
+
+                # Check if this is the peak highlight
                 if i == max_energy_idx:
-                    color = (255, 255, 255)
-                    intensity = 1.0
+                    final_color = (255, 255, 255)
                 else:
-                    if f_center < 250: # Bass Range
-                        color = (100, 150, 255)
-                    elif f_center < 4000: # Mids Range
-                        mix = (f_center - 250) / 3750
-                        r = int(100 + (100 - 100) * mix)
-                        g = int(150 + (255 - 150) * mix)
-                        b = int(255 + (150 - 255) * mix)
-                        color = (r, g, b)
-                    else: # Treble Range
-                        mix = min(1.0, (f_center - 4000) / 16000)
-                        # More vibrant Orange/Red for the high end to match legends
-                        r = int(100 + (255 - 100) * mix)
-                        g = int(255 + (130 - 255) * mix)
-                        b = int(150 + (60 - 150) * mix)
-                        color = (r, g, b)
-                    
-                    # Height-based brightness boost
-                    intensity = 0.7 + 0.3 * bar_heights[i]
-                    
-                final_color = (int(color[0] * intensity), int(color[1] * intensity), int(color[2] * intensity))
-                
+                    # Multi-Stage Waypoints [Freq, R, G, B]
+                    w = [(25, 80, 120, 220), (250, 100, 150, 255), (500, 120, 220, 120), (2000, 140, 240, 140), (4000, 160, 255, 160), (6000, 240, 200, 120), (24000, 240, 150, 80)]
+                    c = w[-1][1:]
+                    for j in range(len(w)-1):
+                        if w[j][0] <= f_center < w[j+1][0]:
+                            m = (np.log10(f_center) - np.log10(w[j][0])) / (np.log10(w[j+1][0]) - np.log10(w[j][0]))
+                            c = (int(w[j][1] + (w[j+1][1]-w[j][1])*m), int(w[j][2] + (w[j+1][2]-w[j][2])*m), int(w[j][3] + (w[j+1][3]-w[j][3])*m))
+                            break
+                    it = 0.7 + 0.3 * bar_heights[i]
+                    final_color = (int(c[0]*it), int(c[1]*it), int(c[2]*it))
+
                 if h > 5:
-                    pygame.draw.rect(screen, final_color, (x, analyzer_y_bottom - h, bar_width, h), border_radius=6)
-                
+                    pygame.draw.rect(
+                        screen,
+                        final_color,
+                        (x, analyzer_y_bottom - h, bar_width, h),
+                        border_radius=6,
+                    )
+
                 # Draw sharp peak indicator
                 if ph > 5:
                     peak_color = (255, 255, 255)
-                    pygame.draw.rect(screen, peak_color, (x, analyzer_y_bottom - ph - 3, bar_width, 2), border_radius=1)
+                    pygame.draw.rect(
+                        screen,
+                        peak_color,
+                        (x, analyzer_y_bottom - ph - 3, bar_width, 2),
+                        border_radius=1,
+                    )
 
             # Draw labels for key frequencies
             key_freqs = [60, 250, 1000, 4000, 16000]
             for f in key_freqs:
                 if f >= MIN_FREQ and f <= MAX_FREQ:
-                    pos_idx = NUM_BANDS * (np.log10(f) - np.log10(max(1.0, MIN_FREQ))) / (np.log10(MAX_FREQ) - np.log10(max(1.0, MIN_FREQ)))
+                    pos_idx = (
+                        NUM_BANDS
+                        * (np.log10(f) - np.log10(max(1.0, MIN_FREQ)))
+                        / (np.log10(MAX_FREQ) - np.log10(max(1.0, MIN_FREQ)))
+                    )
                     label_x = start_x + pos_idx * (bar_width + bar_spacing)
-                    
-                    label_text = f"{int(f/1000)}k" if f >= 1000 else f"{f}"
+
+                    label_text = f"{int(f / 1000)}k" if f >= 1000 else f"{f}"
                     label_surface = font_tiny.render(label_text, True, (130, 150, 130))
-                    label_rect = label_surface.get_rect(midtop=(label_x, analyzer_y_bottom + 15))
+                    label_rect = label_surface.get_rect(
+                        midtop=(label_x, analyzer_y_bottom + 15)
+                    )
                     screen.blit(label_surface, label_rect)
-                    pygame.draw.line(screen, (60, 80, 60), (label_x, analyzer_y_bottom + 2), (label_x, analyzer_y_bottom + 10), 1)
+                    pygame.draw.line(
+                        screen,
+                        (60, 80, 60),
+                        (label_x, analyzer_y_bottom + 2),
+                        (label_x, analyzer_y_bottom + 10),
+                        1,
+                    )
 
             # --- MULTI-LEVEL RANGE LABELS ---
             for rng in FREQ_RANGES:
@@ -516,24 +623,52 @@ while running:
                     # Calculate pixel positions for start/end
                     f_start = max(rng["min"], MIN_FREQ)
                     f_end = min(rng["max"], MAX_FREQ)
-                    
-                    p_start = NUM_BANDS * (np.log10(f_start) - np.log10(max(1.0, MIN_FREQ))) / (np.log10(MAX_FREQ) - np.log10(max(1.0, MIN_FREQ)))
-                    p_end = NUM_BANDS * (np.log10(f_end) - np.log10(max(1.0, MIN_FREQ))) / (np.log10(MAX_FREQ) - np.log10(max(1.0, MIN_FREQ)))
-                    
+
+                    p_start = (
+                        NUM_BANDS
+                        * (np.log10(f_start) - np.log10(max(1.0, MIN_FREQ)))
+                        / (np.log10(MAX_FREQ) - np.log10(max(1.0, MIN_FREQ)))
+                    )
+                    p_end = (
+                        NUM_BANDS
+                        * (np.log10(f_end) - np.log10(max(1.0, MIN_FREQ)))
+                        / (np.log10(MAX_FREQ) - np.log10(max(1.0, MIN_FREQ)))
+                    )
+
                     x_start = start_x + p_start * (bar_width + bar_spacing)
                     x_end = start_x + p_end * (bar_width + bar_spacing)
-                    
+
                     level_y = analyzer_y_bottom + 50 + (rng["level"] * 40)
-                    
+
                     # Draw a colored line for the range
                     line_color = rng["color"]
-                    pygame.draw.line(screen, line_color, (x_start + 2, level_y), (x_end - 2, level_y), 2)
-                    pygame.draw.line(screen, line_color, (x_start + 2, level_y - 5), (x_start + 2, level_y + 5), 1)
-                    pygame.draw.line(screen, line_color, (x_end - 2, level_y - 5), (x_end - 2, level_y + 5), 1)
-                    
+                    pygame.draw.line(
+                        screen,
+                        line_color,
+                        (x_start + 2, level_y),
+                        (x_end - 2, level_y),
+                        2,
+                    )
+                    pygame.draw.line(
+                        screen,
+                        line_color,
+                        (x_start + 2, level_y - 5),
+                        (x_start + 2, level_y + 5),
+                        1,
+                    )
+                    pygame.draw.line(
+                        screen,
+                        line_color,
+                        (x_end - 2, level_y - 5),
+                        (x_end - 2, level_y + 5),
+                        1,
+                    )
+
                     # Render Range Name
                     range_surface = font_tiny.render(rng["name"], True, line_color)
-                    range_rect = range_surface.get_rect(center=((x_start + x_end) // 2, level_y + 15))
+                    range_rect = range_surface.get_rect(
+                        center=((x_start + x_end) // 2, level_y + 15)
+                    )
                     # Only draw if there is space
                     if x_end - x_start > range_rect.width:
                         screen.blit(range_surface, range_rect)
@@ -541,7 +676,7 @@ while running:
             # Determine color based on threshold (Evaluate using dBA, professional standard)
             text_color = (180, 255, 180)  # Brighter Green
             if last_displayed_dba >= THRESHOLD_ERROR:
-                text_color = (255, 80, 80)   # Vivid Red
+                text_color = (255, 80, 80)  # Vivid Red
             elif last_displayed_dba >= THRESHOLD_WARNING:
                 text_color = (255, 180, 50)  # Vivid Orange
 
@@ -562,7 +697,9 @@ while running:
             screen.blit(dbz_text, dbz_rect)
 
             # Render "FAST RESPONSE" indicator (Tiny status info)
-            slope_info = f"{SLOPE_DB_PER_OCTAVE}dB SL" if SLOPE_DB_PER_OCTAVE != 0 else "RAW"
+            slope_info = (
+                f"{SLOPE_DB_PER_OCTAVE}dB SL" if SLOPE_DB_PER_OCTAVE != 0 else "RAW"
+            )
             badge_text = font_tiny.render(
                 f"FAST RESPONSE | SLOPE: {slope_info}", True, (110, 135, 110)
             )  # Compensated subtitle
@@ -577,15 +714,17 @@ while running:
         # 1. Draw a stylized "No Mic" icon in the top-left corner
         icon_surface = pygame.Surface((100, 100), pygame.SRCALPHA)
         # Draw Mic Body (Rounded Rect)
-        pygame.draw.rect(icon_surface, (100, 100, 100), (35, 20, 30, 45), border_radius=15)
+        pygame.draw.rect(
+            icon_surface, (100, 100, 100), (35, 20, 30, 45), border_radius=15
+        )
         # Draw Mic Stand
         pygame.draw.line(icon_surface, (100, 100, 100), (50, 65), (50, 80), 3)
         pygame.draw.line(icon_surface, (100, 100, 100), (35, 80), (65, 80), 3)
         # Draw the Warning Slash (Red)
         pygame.draw.line(icon_surface, (255, 50, 50), (20, 20), (80, 80), 6)
-        
+
         screen.blit(icon_surface, (50, 50))
-        
+
         # 2. Render localized error message
         error_text = font_medium.render(
             "Waiting for I2S Microphone Signal...", True, (120, 120, 120)
