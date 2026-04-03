@@ -34,10 +34,11 @@ DEVICE_INDEX_ENV = os.environ.get("SMARTFRAME_AUDIO_DEVICE")
 if DEVICE_INDEX_ENV and DEVICE_INDEX_ENV != "None" and DEVICE_INDEX_ENV != "":
     DEVICE_INDEX = int(DEVICE_INDEX_ENV)
 
-# Audio Configuration
+# Audio Configuration (Defaults)
 CHUNK = 8192  # High-precision 8k FFT for maximum visual resolution
 FORMAT = pyaudio.paInt16
 CHANNELS = 1
+SAMPLE_RATE = 48000
 
 
 @contextmanager
@@ -149,39 +150,38 @@ try:
 
     if DEVICE_INDEX is not None and isinstance(DEVICE_INDEX, int):
         try:
-            device_info = p.get_device_info_by_index(DEVICE_INDEX)
-            selected_index = DEVICE_INDEX
-            print(
-                f"Using configured audio device: {device_info.get('name')} (index {selected_index})"
-            )
+            info = p.get_device_info_by_index(DEVICE_INDEX)
+            if info.get("maxInputChannels", 0) > 0:
+                device_info = info
+                selected_index = DEVICE_INDEX
+                print(f"Using configured audio device: {device_info.get('name')} (index {selected_index})")
+            else:
+                print(f"Warning: Configured device {DEVICE_INDEX} ({info.get('name')}) has no input channels. Searching for alternatives...")
         except Exception:
-            print(
-                f"Warning: Configured device index {DEVICE_INDEX} not found, searching for alternatives..."
-            )
+            pass
 
     if not device_info:
         try:
-            device_info = p.get_default_input_device_info()
-            selected_index = device_info.get("index")
-            print(
-                f"Using default audio device: {device_info.get('name')} (index {selected_index})"
-            )
+            info = p.get_default_input_device_info()
+            if info.get("maxInputChannels", 0) > 0:
+                device_info = info
+                selected_index = device_info.get("index")
+                print(f"Using default audio device: {device_info.get('name')} (index {selected_index})")
         except Exception:
-            print(
-                "No default input device found, searching for any available capture device..."
-            )
-            for i in range(p.get_device_count()):
-                try:
-                    info = p.get_device_info_by_index(i)
-                    if info.get("maxInputChannels", 0) > 0:
-                        device_info = info
-                        selected_index = i
-                        print(
-                            f"Found alternative capture device: {device_info.get('name')} (index {selected_index})"
-                        )
-                        break
-                except Exception:
-                    continue
+            pass
+
+    if not device_info:
+        print("Searching for any available capture device...")
+        for i in range(p.get_device_count()):
+            try:
+                info = p.get_device_info_by_index(i)
+                if info.get("maxInputChannels", 0) > 0:
+                    device_info = info
+                    selected_index = i
+                    print(f"Found alternative capture device: {device_info.get('name')} (index {selected_index})")
+                    break
+            except Exception:
+                continue
 
     if not device_info or device_info.get("maxInputChannels", 0) == 0:
         raise RuntimeError(
@@ -193,6 +193,8 @@ try:
     # We favor 1 (mono) but use 2 if required.
     max_chans = device_info.get("maxInputChannels", 1)
     CHANNELS = 1 if max_chans == 1 else 2
+    
+    # Update sample rate based on device capabilities
     SAMPLE_RATE = int(device_info.get("defaultSampleRate", 48000))
 
     print(
@@ -234,6 +236,8 @@ except Exception as e:
     print(
         "Ensure the INMP441 I2S microphone is properly connected and configured (ALSA/dtoverlay)."
     )
+    # Ensure bridge variables and gains are defined even in failure state
+    a_gains = np.ones(CHUNK // 2 + 1) # Flat gains as fallback
     stream = None
 
 running = True
@@ -494,7 +498,7 @@ while running:
             # --- IPC BRIDGE FOR ORCHESTRATOR ---
             # Write dBA to a temp file so the orchestrator can report it via MQTT
             # while audio_mode holds the microphone.
-            if current_time - last_bridge_update >= 2.0:
+            if current_time - last_bridge_update >= 1.0:
                 try:
                     with open("/tmp/smartframe_dba", "w") as f:
                         f.write(f"{last_displayed_dba:.1f}")

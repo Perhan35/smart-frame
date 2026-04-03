@@ -9,6 +9,7 @@ import logging
 import signal
 import socket
 import threading
+import queue
 import numpy as np
 import pyaudio
 
@@ -60,6 +61,7 @@ current_mode = 'off'
 mqtt_client = None
 labwc_config_dir = None
 audio_monitor_thread = None
+command_queue = queue.Queue()
 
 # Discovery cache to avoid repeated slow subprocess calls
 CACHE_FILE = os.path.join(os.path.dirname(__file__), '.smartframe_cache')
@@ -193,7 +195,18 @@ class AudioMonitor(threading.Thread):
                     logging.debug(f"Monitor: Bridge file read failed: {e}")
 
             if not use_bridge:
-                # 2. No bridge file or it's stale. Try to use the microphone directly.
+                # 2. No bridge file. Check if Audio Mode is active.
+                # If Audio Mode is starting/running, we MUST NOT hold the mic.
+                if current_mode == 'audio':
+                    if stream:
+                        try: stream.stop_stream(); stream.close()
+                        except: pass
+                        stream = None
+                    # Wait for Audio Mode to start and create the bridge file
+                    time.sleep(0.2)
+                    continue
+
+                # 3. Try to use the microphone directly.
                 if not stream:
                     try:
                         idx = _discover_audio_device()
@@ -236,9 +249,9 @@ class AudioMonitor(threading.Thread):
                     time.sleep(2)
                     continue
 
-            # 3. Publish result to MQTT (throttled to 2s)
+            # 3. Publish result to MQTT (throttled to 1s for better responsiveness)
             now = time.time()
-            if now - self.last_publish >= 2.0 and db_a is not None:
+            if now - self.last_publish >= 1.0 and db_a is not None:
                 if self.mqtt_client and self.mqtt_client.is_connected():
                     try:
                         self.mqtt_client.publish(self.dba_topic, f"{db_a:.1f}", retain=False)
@@ -248,7 +261,7 @@ class AudioMonitor(threading.Thread):
             
             # Simple sleep to reduce CPU usage if we're not waiting on audio stream read
             if use_bridge:
-                time.sleep(1.0)
+                time.sleep(0.5)
 
         if stream:
             try: stream.stop_stream(); stream.close()
@@ -648,14 +661,15 @@ def start_mode(mode):
     
     logging.info(f"Transitioning mode: {current_mode} -> {mode}")
 
-    # 1. Stop the current mode first.
-    stop_current_mode()
-    
-    # 2. Update state variable and publish intent immediately
-    # This fixes the 'previous state' glitch by confirming the change before the sleep
+    # 1. Update state variable and publish intent IMMEDIATELY.
+    # This ensures that the MQTT thread (or HA) sees the change instantly,
+    # even while the hardware/process transitions are happening in the background.
     current_mode = mode
     if mqtt_client and mqtt_client.is_connected():
         mqtt_client.publish(MQTT_STATE_TOPIC, current_mode, retain=True)
+
+    # 2. Stop the current mode.
+    stop_current_mode()
     
     # Small delay for kernel/TTY/DRM handshake settling
     time.sleep(2.0)
@@ -829,29 +843,59 @@ def on_connect(client, userdata, _connect_flags, reason_code, _properties):
             logging.error("MQTT authentication failed. Check your config.yaml.")
             client.disconnect()
 
+def command_worker():
+    """Background worker that executes slow hardware or process commands sequentially
+    to avoid blocking the main MQTT loop thread."""
+    while True:
+        try:
+            cmd, payload = command_queue.get()
+            if cmd == 'mode':
+                start_mode(payload)
+            elif cmd == 'brightness':
+                set_display_brightness(payload)
+            elif cmd == 'contrast':
+                set_display_contrast(payload)
+            elif cmd == 'color_preset':
+                set_display_color_preset(payload)
+            elif cmd == 'input_source':
+                set_display_input_source(payload)
+            command_queue.task_done()
+        except Exception as e:
+            logging.error(f"Command worker error: {e}")
+
 def on_message(client, userdata, msg):
-    payload = msg.payload.decode('utf-8').strip().lower()
-    logging.info(f"Message received on {msg.topic}: {payload}")
-    available_modes = get_available_modes()
+    # For general commands, we want to preserve case (especially for presets)
+    payload_raw = msg.payload.decode('utf-8').strip()
+    payload_lower = payload_raw.lower()
+    
+    logging.info(f"Message received on {msg.topic}: {payload_raw}")
+    
     if msg.topic == MQTT_COMMAND_TOPIC:
-        if payload in available_modes:
-            start_mode(payload)
+        available_modes = get_available_modes()
+        if payload_lower in available_modes:
+            command_queue.put(('mode', payload_lower))
         else:
-            logging.warning(f"Invalid payload '{payload}'. Available modes: {available_modes}")
+            logging.warning(f"Invalid mode payload '{payload_raw}'. Available modes: {available_modes}")
+            
     elif msg.topic == MQTT_BRIGHTNESS_COMMAND_TOPIC:
         try:
-            set_display_brightness(int(payload))
+            command_queue.put(('brightness', int(payload_raw)))
         except ValueError:
-            logging.warning(f"Invalid brightness payload: {payload}")
+            logging.warning(f"Invalid brightness payload: {payload_raw}")
+            
     elif msg.topic == MQTT_CONTRAST_COMMAND_TOPIC:
         try:
-            set_display_contrast(int(payload))
+            command_queue.put(('contrast', int(payload_raw)))
         except ValueError:
-            logging.warning(f"Invalid contrast payload: {payload}")
+            logging.warning(f"Invalid contrast payload: {payload_raw}")
+            
     elif msg.topic == MQTT_COLOR_PRESET_COMMAND_TOPIC:
-        set_display_color_preset(payload)
+        # Use raw payload to match preset names exactly
+        command_queue.put(('color_preset', payload_raw))
+        
     elif msg.topic == MQTT_INPUT_SOURCE_COMMAND_TOPIC:
-        set_display_input_source(payload)
+        # Use raw payload to match source names exactly
+        command_queue.put(('input_source', payload_raw))
 
 def signal_handler(sig, frame):
     logging.info(f"Signal {sig} received. Shutting down orchestrator...")
@@ -914,9 +958,14 @@ if __name__ == '__main__':
 
     try:
         if MQTT_BROKER != "[MQTT_SERVER_IP_ADDRESS]":
-            # Use loop_start (non-blocking thread) to allow the main thread to monitor processes
+            # 1. Start command worker thread
+            worker = threading.Thread(target=command_worker, daemon=True)
+            worker.start()
+            logging.debug("Command worker thread started.")
+
+            # 2. Start MQTT loop (non-blocking thread)
             mqtt_client.loop_start()
-            logging.debug("MQTT background thread started.")
+            logging.debug("MQTT network loop thread started.")
         
             # 3. Start default mode from config
             default_mode = config.get('default_mode', 'off')
