@@ -248,34 +248,31 @@ ema_rms_a = 0.0
 ema_rms_z = 0.0
 
 # --- SPECTRUM ANALYZER CONFIGURATION ---
-NUM_BANDS = 120          # Ultra-high density for 1080p professional display
-MIN_FREQ = 1
-MAX_FREQ = 24000
-MIN_DB = 30
-MAX_DB = 95
-SMOOTHING_FACTOR = 0.78  # Fast, reactive response
-PEAK_GRAVITY = 0.015     # Physical-like peak fall
-PEAK_MAX_SPEED = 0.05
+NUM_BANDS = 80          
+MIN_FREQ = 20            # Standard audible low end (removes infra-jitter)
+MAX_FREQ = 22000         
+MIN_DB = 42              # Increased floor to clear mic noise (ensures bars hit 0 in silence)
+MAX_DB = 105             # Increased headroom to prevent top-saturation
+SMOOTHING_FACTOR = 0.75  # Even more reactive decay
+PEAK_GRAVITY = 0.02
+PEAK_MAX_SPEED = 0.06
 
-# Professional Slope Setting: 0dB (Raw), 3dB (Pink Noise), 4.5dB (Modern Standard)
-# A slope of 4.5dB/octave is standard in pro plugins like FabFilter Pro-Q to make a 
-# balanced mix look "flat" visually.
-SLOPE_DB_PER_OCTAVE = 4.5 
+# Professional Slope Setting: Lowered slightly for more natural high-end
+SLOPE_DB_PER_OCTAVE = 3.5 
 
-# Frequency Range Definitions for visual labels (Updated for 1Hz - 24kHz)
+# Frequency Range Definitions (Cleaned up for 20Hz-22kHz)
 FREQ_RANGES = [
-    {"name": "BASS", "min": 1, "max": 250, "level": 1, "color": (100, 150, 255)},
+    {"name": "BASS", "min": 20, "max": 250, "level": 1, "color": (100, 150, 255)},
     {"name": "MIDS", "min": 250, "max": 4000, "level": 1, "color": (150, 255, 150)},
-    {"name": "TREBLE", "min": 4000, "max": 24000, "level": 1, "color": (255, 150, 100)},
+    {"name": "TREBLE", "min": 4000, "max": 22000, "level": 1, "color": (255, 150, 100)},
     
-    {"name": "Infra", "min": 1, "max": 20, "level": 0, "color": (60, 100, 200)},
     {"name": "Sub", "min": 20, "max": 60, "level": 0, "color": (80, 120, 220)},
     {"name": "Low", "min": 60, "max": 250, "level": 0, "color": (100, 140, 240)},
     {"name": "Low-Mid", "min": 250, "max": 500, "level": 0, "color": (120, 220, 120)},
     {"name": "Mid", "min": 500, "max": 2000, "level": 0, "color": (140, 240, 140)},
     {"name": "Hi-Mid", "min": 2000, "max": 4000, "level": 0, "color": (160, 255, 160)},
     {"name": "Presence", "min": 4000, "max": 6000, "level": 0, "color": (240, 200, 120)},
-    {"name": "Brilliance", "min": 6000, "max": 24000, "level": 0, "color": (240, 150, 80)}
+    {"name": "Brilliance", "min": 6000, "max": 22000, "level": 0, "color": (240, 150, 80)}
 ]
 
 def get_log_bands(sample_rate, fft_size, num_bands, min_f, max_f):
@@ -405,10 +402,10 @@ while running:
                 if len(indices) > 0:
                     # Get the average magnitude for this band
                     mag = np.mean(fft_mag[indices])
-                    # Visual tilt: +4.5dB per octave approx (18dB over ~4 octaves of interest)
+                    # Calculate dB with tilt and normalize
                     db_val = 20 * np.log10(max(1e-9, mag)) + CALIBRATION_OFFSET + visual_tilt[i]
                     
-                    # Normalize to 0.0 - 1.0 range (Headroom: 15dB to 95dB)
+                    # Normalize to 0.0 - 1.0 range (Floor: 42dB, Ceiling: 105dB)
                     norm_val = (db_val - MIN_DB) / (MAX_DB - MIN_DB)
                     current_bar_targets[i] = np.clip(norm_val, 0, 1)
 
