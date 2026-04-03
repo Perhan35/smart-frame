@@ -71,7 +71,7 @@ if [ "$BROWSER_TYPE" = "chromium" ]; then
     # --disable-dev-shm-usage: Fixes memory issues on low-RAM devices
     # --use-mock-keychain: Avoids D-Bus/Identity/OSCrypt overhead and log spam
     # --disk-cache-dir=$CACHE_DIR: Persistent cache (NOT /tmp which is wiped on reboot)
-    CHROME_FLAGS="--no-sandbox --noerrdialogs --disable-infobars --kiosk --hide-scrollbars \
+    CHROME_FLAGS="--no-sandbox --noerrdialogs --disable-infobars --kiosk --hide-scrollbars --no-memcheck \
 --password-store=basic --use-mock-keychain --check-for-update-interval=31536000 \
 --enable-low-end-device-mode --disable-site-isolation-trials --test-type --no-pings \
 --disable-notifications --disable-sync --autoplay-policy=no-user-gesture-required \
@@ -150,9 +150,31 @@ if [ -n "$WAYLAND_DISPLAY" ]; then
     fi
     PID=$!
     
+    # Auto-dismiss the "less than 1GB RAM" modal dialog on headless kiosk.
+    # Chromium shows this on Pi Zero 2 (512MB) and it requires keyboard/mouse to dismiss.
+    # We send Enter key multiple times with increasing delays to handle timing variance.
+    (
+        _dismiss_dialog() {
+            if command -v wtype &>/dev/null; then
+                wtype -k Return 2>/dev/null
+            elif command -v xdotool &>/dev/null; then
+                xdotool key Return 2>/dev/null
+            elif command -v ydotool &>/dev/null; then
+                ydotool key 28:1 28:0 2>/dev/null
+            fi
+        }
+        # Try at 8s, 12s, 16s (browser takes ~10-20s to show the dialog on Pi Zero 2)
+        for delay in 8 12 16 20; do
+            sleep "$delay" &
+            wait $!
+            _dismiss_dialog
+        done
+    ) &
+    DISMISS_PID=$!
+
     # Kiosk trigger: In Wayland, tell the compositor to hide its cursor once the browser has loaded.
     # This is highly effective for labwc without impacting other modes.
-    if command -v labwc-msg &> /dev/null; then
+    if command -v labwc-msg &>/dev/null; then
         (sleep 3 && labwc-msg action HideCursor) &
     fi
 elif [ -n "$DISPLAY" ]; then
@@ -163,14 +185,25 @@ elif [ -n "$DISPLAY" ]; then
         $FULL_CMD "$MIRROR_URL" &> /dev/null &
     fi
     PID=$!
+    # Same auto-dismiss for X11
+    (
+        for delay in 8 12 16 20; do
+            sleep "$delay" &
+            wait $!
+            if command -v xdotool &>/dev/null; then
+                xdotool key Return 2>/dev/null
+            fi
+        done
+    ) &
+    DISMISS_PID=$!
 else
     echo "Error: No Wayland/X11 display environment found."
     echo "Note: This script is intended to be run within an existing session or wrapped by labwc."
     exit 1
 fi
 
-# Cleanup browser and unclutter on exit (do NOT delete persistent profiles)
-trap 'echo "Cleaning up..."; kill $PID 2>/dev/null; wait $PID 2>/dev/null; kill $UNCLUTTER_PID 2>/dev/null' EXIT
+# Cleanup browser, dismiss helper, and unclutter on exit (do NOT delete persistent profiles)
+trap 'echo "Cleaning up..."; kill $PID $DISMISS_PID $UNCLUTTER_PID 2>/dev/null; wait $PID 2>/dev/null' EXIT
 
 
 # Wait for Chromium to be killed by the parent Python script
