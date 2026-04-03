@@ -81,7 +81,8 @@ if [ "$BROWSER_TYPE" = "chromium" ]; then
 --disable-features=Translate,OptimizationHints,MediaRouter,DialMediaRouteProvider,PrintPreview,OnDeviceModel,OptimizationGuideModelExecution,WebGPU,SkiaGraphite,WebRtcHideLocalIpsWithMdns,SafeBrowsing,GCM,OptimizationGuide,EnterpriseDataProtectionAnalysis,AudioServiceOutOfProcess,BackForwardCache,IsolateOrigins,SitePerProcess,Vulkan,BatteryStatus,NetworkQualityEstimator,PrivacySandboxSettings4,FedCm,InterestFeedContentSuggestions,SegmentationPlatform,PushMessaging,CloudMessaging \
 --disable-variations-safe-mode --disable-dev-shm-usage \
 --disable-gpu --disable-gpu-compositing \
---num-raster-threads=2 --single-process \
+--num-raster-threads=2 --renderer-process-limit=1 \
+--disable-session-crashed-bubble --hide-crash-restore-bubble \
 --ignore-certificate-errors --allow-running-insecure-content --remote-allow-origins=* \
 --user-data-dir=$PROFILE_DIR \
 --memory-pressure-thresholds=1,2 --js-flags='--max-old-space-size=128 --stack-size=1024' \
