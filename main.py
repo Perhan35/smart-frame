@@ -3,6 +3,7 @@ import subprocess
 import sys
 import time
 import json
+import shutil
 import yaml
 import paho.mqtt.client as mqtt
 import logging
@@ -100,7 +101,6 @@ _working_methods = {
 }
 
 available_modes_cache = []
-
 
 def get_available_modes():
     """List all available mode names from the modes directory (with memory caching)."""
@@ -362,6 +362,9 @@ def _save_cache():
     except Exception:
         pass
 
+
+# Load discovery cache at startup (avoids disk reads on first mode transition)
+_load_cache()
 
 _display_env_detected = False
 
@@ -726,7 +729,7 @@ def stop_current_mode():
         try:
             # Kill the entire process group
             os.killpg(os.getpgid(current_process.pid), signal.SIGTERM)
-            current_process.wait(timeout=5)
+            current_process.wait(timeout=2)  # 2s is plenty for graceful exit
         except (subprocess.TimeoutExpired, ProcessLookupError, PermissionError):
             try:
                 os.killpg(os.getpgid(current_process.pid), signal.SIGKILL)
@@ -737,8 +740,6 @@ def stop_current_mode():
         # Cleanup temporary config directory if it exists
         global labwc_config_dir
         if labwc_config_dir and os.path.exists(labwc_config_dir):
-            import shutil
-
             try:
                 shutil.rmtree(labwc_config_dir)
             except Exception:
@@ -802,17 +803,20 @@ def start_mode(mode):
     stop_current_mode()
 
     # Small delay for kernel/TTY/DRM handshake settling
-    time.sleep(2.0)
+    # Start display power ON in parallel (runs while DRM settles)
+    if mode != "off":
+        display_thread = threading.Thread(target=set_display_power, args=(True,), daemon=True)
+        display_thread.start()
+
+    time.sleep(0.5)
 
     if mode == "off":
         logging.info("Ensuring display power is OFF.")
         set_display_power(False)
         return  # State already published above
     else:
-        # Pre-emptive power ON (so the next mode doesn't start in the dark)
-        set_display_power(True)
-        # Wait for monitor to wake up and DRM/I2C to be ready
-        time.sleep(1.5)
+        # Wait for display power ON to complete (max 3.5s, usually ~1s)
+        display_thread.join(timeout=4.0)
 
         modes_dir = os.path.join(os.path.dirname(__file__), "modes")
         py_script = os.path.join(modes_dir, f"{mode}_mode.py")
