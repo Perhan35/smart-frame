@@ -53,31 +53,44 @@ echo "[$(date '+%Y-%m-%d %H:%M:%S')] Browser selected: $BROWSER_TYPE"
 
 # Performance and suppression flags for Chromium
 if [ "$BROWSER_TYPE" = "chromium" ]; then
-    # Persistent profile directory to enable caching (immensely speeds up subsequent starts)
+    # Persistent profile + disk cache directory (survives reboots for fast subsequent starts)
     PROFILE_DIR="$DIR/../.chromium_profile"
-    mkdir -p "$PROFILE_DIR"
-    # Purge stale GPU cache that may perpetuate GL init failures from prior sessions
+    CACHE_DIR="$PROFILE_DIR/DiskCache"
+    mkdir -p "$PROFILE_DIR" "$CACHE_DIR"
+    # Purge stale GPU cache from prior sessions
     rm -rf "$PROFILE_DIR/GPUCache" "$PROFILE_DIR/ShaderCache" "$PROFILE_DIR/GrShaderCache" 2>/dev/null
 
-    # Detect GPU availability (VideoCore / KMS)
-    HAS_GPU=0
-    if [ -c /dev/dri/card0 ] || [ -c /dev/dri/renderD128 ]; then
-        HAS_GPU=1
-    fi
-
-    # Performance and suppression flags for Chromium (Deeply optimized for Pi Zero 2)
+    # Pi Zero 2 WH: vc4 GPU only supports GLES 2.0 but Chromium ANGLE requires GLES 3.0.
+    # No hardware GL backend works, so we use CPU-based Skia software rendering (--disable-gpu).
+    # This is faster than SwiftShader on this hardware and avoids the GPU process crash loop entirely.
+    #
+    # Key flags:
+    # --disable-gpu: Skip GPU/ANGLE entirely, use Skia software rasterizer (mandatory for vc4)
+    # --disable-gpu-compositing: All compositing on CPU (avoids fallback GL attempts)
     # --no-sandbox: fix "Failed global descriptor lookup" on Pi kiosk
-    # --use-gl=angle --use-angle=gles: Use ANGLE's GLES backend (matches Pi Chromium's allowed GL implementations)
-    # --in-process-gpu: Run GPU in the browser process to avoid GPU process crash loops on Pi
     # --disable-dev-shm-usage: Fixes memory issues on low-RAM devices
     # --use-mock-keychain: Avoids D-Bus/Identity/OSCrypt overhead and log spam
-    CHROME_FLAGS="--no-sandbox --noerrdialogs --disable-infobars --kiosk --hide-scrollbars --password-store=basic --use-mock-keychain --check-for-update-interval=31536000 --no-memcheck --enable-low-end-device-mode --disable-site-isolation-trials --test-type --no-pings --disable-notifications --disable-sync --autoplay-policy=no-user-gesture-required --disable-background-networking --disable-component-update --disable-default-apps --disable-domain-reliability --disable-extensions --disable-client-side-phishing-detection --no-first-run --no-default-browser-check --disable-cloud-import --disable-breakpad --metrics-recording-only --disable-gcm-extension --disable-gcm --disable-safe-browsing-extension-api --safebrowsing-disable-auto-update --safebrowsing-disable-download-protection --disable-features=Translate,OptimizationHints,MediaRouter,DialMediaRouteProvider,PrintPreview,OnDeviceModel,OptimizationGuideModelExecution,WebGPU,SkiaGraphite,WebRtcHideLocalIpsWithMdns,SafeBrowsing,GCM,OptimizationGuide,EnterpriseDataProtectionAnalysis,AudioServiceOutOfProcess,BackForwardCache,IsolateOrigins,SitePerProcess,Vulkan,BatteryStatus,NetworkQualityEstimator,PrivacySandboxSettings4,FedCm,InterestFeedContentSuggestions,SegmentationPlatform,PushMessaging,CloudMessaging --disable-variations-safe-mode --disable-dev-shm-usage --disable-gpu-watchdog --enable-zero-copy --use-gl=angle --use-angle=gles --ignore-certificate-errors --allow-running-insecure-content --remote-allow-origins=* --user-data-dir=$PROFILE_DIR --memory-pressure-thresholds=1,2 --js-flags='--max-old-space-size=128 --stack-size=1024' --disable-smooth-scrolling --mute-audio --force-device-scale-factor=1 --disable-background-timer-throttling --disk-cache-dir=/tmp --disk-cache-size=20971520 --media-cache-size=1 --disable-policy-cloud-management --no-proxy-server --disable-gpu-shader-disk-cache --disable-vulkan --in-process-gpu"
+    # --disk-cache-dir=$CACHE_DIR: Persistent cache (NOT /tmp which is wiped on reboot)
+    CHROME_FLAGS="--no-sandbox --noerrdialogs --disable-infobars --kiosk --hide-scrollbars \
+--password-store=basic --use-mock-keychain --check-for-update-interval=31536000 \
+--enable-low-end-device-mode --disable-site-isolation-trials --test-type --no-pings \
+--disable-notifications --disable-sync --autoplay-policy=no-user-gesture-required \
+--disable-background-networking --disable-component-update --disable-default-apps \
+--disable-domain-reliability --disable-extensions --disable-client-side-phishing-detection \
+--no-first-run --no-default-browser-check --disable-breakpad --metrics-recording-only \
+--disable-features=Translate,OptimizationHints,MediaRouter,DialMediaRouteProvider,PrintPreview,OnDeviceModel,OptimizationGuideModelExecution,WebGPU,SkiaGraphite,WebRtcHideLocalIpsWithMdns,SafeBrowsing,GCM,OptimizationGuide,EnterpriseDataProtectionAnalysis,AudioServiceOutOfProcess,BackForwardCache,IsolateOrigins,SitePerProcess,Vulkan,BatteryStatus,NetworkQualityEstimator,PrivacySandboxSettings4,FedCm,InterestFeedContentSuggestions,SegmentationPlatform,PushMessaging,CloudMessaging \
+--disable-variations-safe-mode --disable-dev-shm-usage \
+--disable-gpu --disable-gpu-compositing \
+--num-raster-threads=2 --single-process \
+--ignore-certificate-errors --allow-running-insecure-content --remote-allow-origins=* \
+--user-data-dir=$PROFILE_DIR \
+--memory-pressure-thresholds=1,2 --js-flags='--max-old-space-size=128 --stack-size=1024' \
+--disable-smooth-scrolling --mute-audio --force-device-scale-factor=1 \
+--disable-background-timer-throttling \
+--disk-cache-dir=$CACHE_DIR --disk-cache-size=52428800 --media-cache-size=10485760 \
+--disable-policy-cloud-management --no-proxy-server --disable-vulkan"
 
-    # Add hardware acceleration flags only if GPU is present
-    if [ "$HAS_GPU" = "1" ]; then
-        CHROME_FLAGS="$CHROME_FLAGS --enable-gpu-rasterization --ignore-gpu-blocklist --enable-accelerated-2d-canvas --enable-native-gpu-memory-buffers"
-        echo "GPU detected: Enabling hardware acceleration flags (GLES2)."
-    fi
+    echo "Pi Zero 2 mode: GPU disabled (vc4 GLES 2.0 incompatible with Chromium ANGLE). Using CPU rendering."
 
     # Conditional logging for debugging
     if [ "$SMARTFRAME_DEBUG" = "1" ]; then
