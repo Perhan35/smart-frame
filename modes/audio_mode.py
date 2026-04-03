@@ -255,8 +255,8 @@ ema_rms_z = 0.0
 NUM_BANDS = 96
 MIN_FREQ = 25
 MAX_FREQ = 24000
-MIN_DB = 55
-MAX_DB = 135  # Balanced range for high-energy music
+MIN_DB = 62
+MAX_DB = 140  # Balanced range for high-energy music
 SMOOTHING_FACTOR = 0.72
 PEAK_GRAVITY = 0.04
 PEAK_MAX_SPEED = 0.15
@@ -353,6 +353,7 @@ cpu_temp = 0
 last_cpu_total = 0
 last_cpu_idle = 0
 
+
 def get_cpu_stats():
     """Fetch CPU temperature and raw CPU time data for usage calculation."""
     temp = 0.0
@@ -379,8 +380,9 @@ def get_cpu_stats():
                     idle = times[3]
     except (IOError, ValueError, IndexError):
         pass
-    
+
     return temp, total, idle
+
 
 while running:
     for event in pygame.event.get():
@@ -400,7 +402,7 @@ while running:
             diff_idle = curr_idle - last_cpu_idle
             if diff_total > 0:
                 cpu_usage = (1.0 - (diff_idle / diff_total)) * 100.0
-        
+
         last_cpu_total = curr_total
         last_cpu_idle = curr_idle
         cpu_temp = curr_temp
@@ -409,8 +411,8 @@ while running:
     # Render minimalist CPU stats (top-left, discreet)
     stats_color = (110, 130, 110)  # Subtle technical green
     if cpu_temp > 75:
-        stats_color = (220, 80, 80) # Warning red for high temp
-    
+        stats_color = (220, 80, 80)  # Warning red for high temp
+
     stats_text = f"CPU {int(cpu_usage)}%  |  {cpu_temp:.1f}°C"
     stats_surface = font_tiny.render(stats_text, True, stats_color)
     screen.blit(stats_surface, (50, 50))
@@ -564,15 +566,29 @@ while running:
                     final_color = (255, 255, 255)
                 else:
                     # Multi-Stage Waypoints [Freq, R, G, B]
-                    w = [(25, 80, 120, 220), (250, 100, 150, 255), (500, 120, 220, 120), (2000, 140, 240, 140), (4000, 160, 255, 160), (6000, 240, 200, 120), (24000, 240, 150, 80)]
+                    w = [
+                        (25, 80, 120, 220),
+                        (250, 100, 150, 255),
+                        (500, 120, 220, 120),
+                        (2000, 140, 240, 140),
+                        (4000, 160, 255, 160),
+                        (6000, 240, 200, 120),
+                        (24000, 240, 150, 80),
+                    ]
                     c = w[-1][1:]
-                    for j in range(len(w)-1):
-                        if w[j][0] <= f_center < w[j+1][0]:
-                            m = (np.log10(f_center) - np.log10(w[j][0])) / (np.log10(w[j+1][0]) - np.log10(w[j][0]))
-                            c = (int(w[j][1] + (w[j+1][1]-w[j][1])*m), int(w[j][2] + (w[j+1][2]-w[j][2])*m), int(w[j][3] + (w[j+1][3]-w[j][3])*m))
+                    for j in range(len(w) - 1):
+                        if w[j][0] <= f_center < w[j + 1][0]:
+                            m = (np.log10(f_center) - np.log10(w[j][0])) / (
+                                np.log10(w[j + 1][0]) - np.log10(w[j][0])
+                            )
+                            c = (
+                                int(w[j][1] + (w[j + 1][1] - w[j][1]) * m),
+                                int(w[j][2] + (w[j + 1][2] - w[j][2]) * m),
+                                int(w[j][3] + (w[j + 1][3] - w[j][3]) * m),
+                            )
                             break
                     it = 0.7 + 0.3 * bar_heights[i]
-                    final_color = (int(c[0]*it), int(c[1]*it), int(c[2]*it))
+                    final_color = (int(c[0] * it), int(c[1] * it), int(c[2] * it))
 
                 if h > 5:
                     pygame.draw.rect(
