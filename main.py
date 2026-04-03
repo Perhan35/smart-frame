@@ -718,8 +718,6 @@ def _run_vcp_command(vcp_code, value):
         logging.debug(f"ddcutil VCP {vcp_code} failed: {e}")
         return False
 
-    return False
-
 
 def stop_current_mode():
     global current_process
@@ -870,12 +868,6 @@ def start_mode(mode):
                 env["XDG_CONFIG_HOME"] = labwc_config_dir
                 env["XCURSOR_SIZE"] = "0"
                 env["COG_PLATFORM_FDO_SHOW_CURSOR"] = "0"
-                env["MIRROR_URL"] = config.get("magic_mirror", {}).get(
-                    "url", "http://localhost:8080"
-                )
-                env["SMARTFRAME_AUDIO_DEVICE"] = str(
-                    config.get("audio", {}).get("device_index", "")
-                )
 
                 final_cmd = [labwc_bin, "-s", cmd_str]
                 logging.info(
@@ -1215,8 +1207,7 @@ if __name__ == "__main__":
     try:
         # --- GLOBAL FAIL-SAFE & SYNC LOOP (State Guardian) ---
         while True:
-            # Explicitly declare globals to ensure we are syncing the correct state
-            global current_mode, current_process
+            # Explicitly sync to ensure we are using the correct state
             now = time.time()
 
             # 1. Watchdog: Check if the current mode process has crashed unexpectedly
