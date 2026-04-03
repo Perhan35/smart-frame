@@ -95,6 +95,8 @@ current_process = None
 current_mode = "off"
 mqtt_client = None
 labwc_config_dir = None
+_labwc_process = None       # Persistent labwc compositor (reused across mode switches)
+_labwc_wayland_display = None  # WAYLAND_DISPLAY name for the persistent labwc session
 audio_monitor_thread = None
 command_queue = queue.Queue()
 
@@ -383,6 +385,19 @@ _load_cache()
 _display_env_detected = False
 
 
+def _is_wayland_reachable(display_name):
+    """Check if a Wayland socket is actually listening."""
+    runtime_dir = os.environ.get("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}")
+    socket_path = os.path.join(runtime_dir, display_name)
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
+            s.settimeout(0.1)
+            s.connect(socket_path)
+        return True
+    except Exception:
+        return False
+
+
 def setup_display_env(force=False):
     """Detect and validate the current display environment (Wayland/X11)."""
     global _display_env_detected
@@ -399,18 +414,6 @@ def setup_display_env(force=False):
     uid = os.getuid()
     needs_save = False
 
-    def is_wayland_reachable(display_name):
-        """Check if a Wayland socket is actually listening."""
-        runtime_dir = os.environ.get("XDG_RUNTIME_DIR", f"/run/user/{uid}")
-        socket_path = os.path.join(runtime_dir, display_name)
-        try:
-            with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
-                s.settimeout(0.1)
-                s.connect(socket_path)
-            return True
-        except Exception:
-            return False
-
     def is_x11_active():
         """Check if X server is running by looking for the process."""
         for pattern in ["Xorg", "X"]:
@@ -425,7 +428,7 @@ def setup_display_env(force=False):
 
     # 1. Validate environment
     if "WAYLAND_DISPLAY" in os.environ:
-        if not is_wayland_reachable(os.environ["WAYLAND_DISPLAY"]):
+        if not _is_wayland_reachable(os.environ["WAYLAND_DISPLAY"]):
             del os.environ["WAYLAND_DISPLAY"]
             _working_methods["session_type"] = None
             needs_save = True
@@ -445,7 +448,7 @@ def setup_display_env(force=False):
         if _working_methods["session_type"] != "X11":
             for i in range(2):
                 name = f"wayland-{i}"
-                if is_wayland_reachable(name):
+                if _is_wayland_reachable(name):
                     os.environ["WAYLAND_DISPLAY"] = name
                     if _working_methods["session_type"] != "Wayland":
                         _working_methods["session_type"] = "Wayland"
@@ -737,13 +740,13 @@ def _run_vcp_command(vcp_code, value):
 
 
 def stop_current_mode():
+    """Stop the current mode's client process. The labwc compositor is kept alive for fast switching."""
     global current_process
     if current_process:
         logging.info("Stopping current mode process...")
         try:
-            # Kill the entire process group
             os.killpg(os.getpgid(current_process.pid), signal.SIGTERM)
-            current_process.wait(timeout=2)  # 2s is plenty for graceful exit
+            current_process.wait(timeout=2)
         except (subprocess.TimeoutExpired, ProcessLookupError, PermissionError):
             try:
                 os.killpg(os.getpgid(current_process.pid), signal.SIGKILL)
@@ -751,18 +754,8 @@ def stop_current_mode():
                 pass
         current_process = None
 
-        # Cleanup temporary config directory if it exists
-        global labwc_config_dir
-        if labwc_config_dir and os.path.exists(labwc_config_dir):
-            try:
-                shutil.rmtree(labwc_config_dir)
-            except Exception:
-                pass
-            labwc_config_dir = None
-
-        # Kill any orphaned browser/compositor processes from previous sessions
-        # This prevents "Connection reset by peer" errors when transitioning modes
-        for proc_name in ["chromium", "chromium-browser", "cog", "labwc"]:
+        # Kill orphaned browser processes (NOT labwc — it's reused)
+        for proc_name in ["chromium", "chromium-browser", "cog"]:
             try:
                 subprocess.run(
                     ["pkill", "-f", proc_name],
@@ -771,17 +764,8 @@ def stop_current_mode():
             except Exception:
                 pass
 
-        # Small settle time for kernel/DRM/Wayland to fully release resources
-        time.sleep(0.3)
-
-        # Clear specific display environment variables as the session they belonged to is now dead
-        if "WAYLAND_DISPLAY" in os.environ:
-            del os.environ["WAYLAND_DISPLAY"]
-        if "DISPLAY" in os.environ:
-            del os.environ["DISPLAY"]
-
-        global _display_env_detected
-        _display_env_detected = False  # Allow re-detection for the next mode
+        # Brief settle for the client process to release Wayland resources
+        time.sleep(0.1)
 
 
 def _get_labwc_config():
@@ -808,117 +792,218 @@ def _get_labwc_config():
     return config_dir
 
 
+def _ensure_labwc():
+    """Start a persistent labwc compositor if not already running. Returns env dict for clients."""
+    global _labwc_process, _labwc_wayland_display, labwc_config_dir, _display_env_detected
+
+    # Check if existing labwc is still alive and its socket reachable
+    if _labwc_process and _labwc_process.poll() is None:
+        if _labwc_wayland_display and _is_wayland_reachable(_labwc_wayland_display):
+            logging.debug("Reusing persistent labwc compositor.")
+            return _labwc_wayland_display
+        # Process alive but socket dead — tear down
+        logging.warning("labwc process alive but socket unreachable, restarting.")
+        _stop_labwc()
+
+    # Find labwc binary (cached)
+    labwc_bin = _working_methods.get("labwc_path")
+    if not labwc_bin:
+        labwc_bin = subprocess.check_output(["which", "labwc"]).decode().strip()
+        _working_methods["labwc_path"] = labwc_bin
+        _save_cache()
+
+    # Create config directory (reuse if still exists)
+    if not labwc_config_dir or not os.path.exists(labwc_config_dir):
+        labwc_config_dir = _get_labwc_config()
+
+    env = os.environ.copy()
+    env["XDG_CONFIG_HOME"] = labwc_config_dir
+    env["XCURSOR_SIZE"] = "0"
+    env["COG_PLATFORM_FDO_SHOW_CURSOR"] = "0"
+
+    # Snapshot existing wayland sockets to detect the new one
+    runtime_dir = os.environ.get("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}")
+    existing_sockets = set()
+    try:
+        existing_sockets = {f for f in os.listdir(runtime_dir) if f.startswith("wayland-") and not f.endswith(".lock")}
+    except OSError:
+        pass
+
+    # Launch labwc WITHOUT -s (no startup command — it stays as a bare compositor)
+    _labwc_process = subprocess.Popen(
+        [labwc_bin], env=env, start_new_session=True,
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+    logging.info(f"Started persistent labwc compositor (PID {_labwc_process.pid}).")
+
+    # Wait for the new Wayland socket to appear (max ~2s)
+    for attempt in range(40):
+        try:
+            current_sockets = {f for f in os.listdir(runtime_dir) if f.startswith("wayland-") and not f.endswith(".lock")}
+        except OSError:
+            current_sockets = set()
+        new_sockets = current_sockets - existing_sockets
+        for name in sorted(new_sockets):
+            if _is_wayland_reachable(name):
+                _labwc_wayland_display = name
+                os.environ["WAYLAND_DISPLAY"] = name
+                _display_env_detected = True
+                logging.info(f"labwc Wayland socket ready: {name}")
+                # Hide cursor once for the lifetime of this compositor
+                threading.Thread(target=_labwc_hide_cursor, daemon=True).start()
+                return name
+        # Also check common names in case the snapshot missed it
+        for name in ["wayland-0", "wayland-1"]:
+            if name not in existing_sockets and _is_wayland_reachable(name):
+                _labwc_wayland_display = name
+                os.environ["WAYLAND_DISPLAY"] = name
+                _display_env_detected = True
+                logging.info(f"labwc Wayland socket ready: {name}")
+                threading.Thread(target=_labwc_hide_cursor, daemon=True).start()
+                return name
+        time.sleep(0.05)
+
+    raise RuntimeError("labwc started but no Wayland socket detected within 2s")
+
+
+def _labwc_hide_cursor():
+    """Tell the persistent labwc to hide its cursor (fire-and-forget, best-effort)."""
+    try:
+        subprocess.run(
+            ["labwc-msg", "action", "HideCursor"],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=2,
+        )
+    except Exception:
+        pass
+
+
+def _stop_labwc():
+    """Tear down the persistent labwc compositor (only called for 'off' mode or error recovery)."""
+    global _labwc_process, _labwc_wayland_display, labwc_config_dir, _display_env_detected
+
+    if _labwc_process:
+        logging.info("Stopping persistent labwc compositor.")
+        try:
+            os.killpg(os.getpgid(_labwc_process.pid), signal.SIGTERM)
+            _labwc_process.wait(timeout=2)
+        except (subprocess.TimeoutExpired, ProcessLookupError, PermissionError):
+            try:
+                os.killpg(os.getpgid(_labwc_process.pid), signal.SIGKILL)
+            except Exception:
+                pass
+        _labwc_process = None
+
+    _labwc_wayland_display = None
+
+    if labwc_config_dir and os.path.exists(labwc_config_dir):
+        try:
+            shutil.rmtree(labwc_config_dir)
+        except Exception:
+            pass
+        labwc_config_dir = None
+
+    # Kill any orphaned labwc processes
+    try:
+        subprocess.run(["pkill", "-f", "labwc"],
+                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=2)
+    except Exception:
+        pass
+
+    if "WAYLAND_DISPLAY" in os.environ:
+        del os.environ["WAYLAND_DISPLAY"]
+    if "DISPLAY" in os.environ:
+        del os.environ["DISPLAY"]
+    _display_env_detected = False
+
+    time.sleep(0.3)  # Brief settle for DRM/kernel resource release
+
+
 def start_mode(mode):
     global current_process, current_mode, mqtt_client
 
     mode = mode.lower()
     if mode == current_mode:
-        # Always publish state confirmation even if already in mode to keep HA in sync
         if mqtt_client and mqtt_client.is_connected():
             mqtt_client.publish(MQTT_STATE_TOPIC, current_mode, retain=True)
         return
 
-    logging.info(f"Transitioning mode: {current_mode} -> {mode}")
+    previous_mode = current_mode
+    logging.info(f"Transitioning mode: {previous_mode} -> {mode}")
 
-    # 1. Update state variable and publish intent IMMEDIATELY.
-    # This ensures that the MQTT thread (or HA) sees the change instantly,
-    # even while the hardware/process transitions are happening in the background.
+    # 1. Publish intent IMMEDIATELY so HA sees the change instantly.
     current_mode = mode
     if mqtt_client and mqtt_client.is_connected():
         mqtt_client.publish(MQTT_STATE_TOPIC, current_mode, retain=True)
 
-    # 2. Stop the current mode.
+    # 2. Stop the current mode's client process (labwc compositor stays alive).
     stop_current_mode()
-
-    # Small delay for kernel/TTY/DRM handshake settling
-    # Start display power ON in parallel (runs while DRM settles)
-    if mode != "off":
-        display_thread = threading.Thread(target=set_display_power, args=(True,), daemon=True)
-        display_thread.start()
-
-    time.sleep(0.5)
 
     if mode == "off":
         logging.info("Ensuring display power is OFF.")
+        _stop_labwc()  # Tear down compositor when going fully off
         set_display_power(False)
-        return  # State already published above
+        return
+
+    # 3. Only turn display ON if coming from "off" (it's already on for mode-to-mode switches).
+    display_thread = None
+    if previous_mode == "off":
+        display_thread = threading.Thread(target=set_display_power, args=(True,), daemon=True)
+        display_thread.start()
+
+    # 4. Resolve mode script.
+    modes_dir = os.path.join(os.path.dirname(__file__), "modes")
+    py_script = os.path.join(modes_dir, f"{mode}_mode.py")
+    sh_script = os.path.join(modes_dir, f"{mode}_mode.sh")
+
+    base_cmd = []
+    if os.path.exists(sh_script):
+        base_cmd = ["bash", sh_script]
+    elif os.path.exists(py_script):
+        base_cmd = [sys.executable, py_script]
     else:
-        # Wait for display power ON to complete (max 3.5s, usually ~1s)
+        available = get_available_modes()
+        logging.warning(f"Unknown mode: {mode}. Available modes: {available}")
+        current_mode = "off"
+        _stop_labwc()
+        set_display_power(False)
+        if mqtt_client and mqtt_client.is_connected():
+            mqtt_client.publish(MQTT_STATE_TOPIC, current_mode, retain=True)
+        return
+
+    # Wait for display power ON if we started it
+    if display_thread:
         display_thread.join(timeout=4.0)
 
-        modes_dir = os.path.join(os.path.dirname(__file__), "modes")
-        py_script = os.path.join(modes_dir, f"{mode}_mode.py")
-        sh_script = os.path.join(modes_dir, f"{mode}_mode.sh")
-
-        base_cmd = []
-        if os.path.exists(sh_script):
-            base_cmd = ["bash", sh_script]
-        elif os.path.exists(py_script):
-            base_cmd = [sys.executable, py_script]
-        else:
-            available = get_available_modes()
-            logging.warning(f"Unknown mode: {mode}. Available modes: {available}")
-            current_mode = "off"
-            set_display_power(False)
-            if mqtt_client and mqtt_client.is_connected():
-                mqtt_client.publish(MQTT_STATE_TOPIC, current_mode, retain=True)
-            return
-
-        # 3. Intelligent Session Wrapping:
-        setup_display_env()
-        final_cmd = base_cmd
-
-        if not os.environ.get("WAYLAND_DISPLAY") and not os.environ.get("DISPLAY"):
-            try:
-                # Use cached path or find it once
-                labwc_bin = _working_methods.get("labwc_path")
-                if not labwc_bin:
-                    labwc_bin = (
-                        subprocess.check_output(["which", "labwc"]).decode().strip()
-                    )
-                    _working_methods["labwc_path"] = labwc_bin
-                    _save_cache()
-
-                global labwc_config_dir
-                labwc_config_dir = _get_labwc_config()
-
-                env = os.environ.copy()
-
-                # Auto-discover and cache the audio input device
-                audio_idx = _discover_audio_device()
-                env["SMARTFRAME_AUDIO_DEVICE"] = str(
-                    audio_idx if audio_idx is not None else ""
-                )
-                env["SMARTFRAME_DEBUG"] = "1" if DEBUG_MODE else "0"
-
-                if mode == "mirror":
-                    env["MIRROR_URL"] = config.get("magic_mirror", {}).get(
-                        "url", "http://localhost:8080"
-                    )
-
-                cmd_str = " ".join(base_cmd)
-                env["XDG_CONFIG_HOME"] = labwc_config_dir
-                env["XCURSOR_SIZE"] = "0"
-                env["COG_PLATFORM_FDO_SHOW_CURSOR"] = "0"
-
-                final_cmd = [labwc_bin, "-s", cmd_str]
-                logging.info(
-                    f"Wrapping mode '{mode}' in a managed Wayland session (labwc)."
-                )
-                current_process = subprocess.Popen(
-                    final_cmd, env=env, start_new_session=True, stdout=None, stderr=None
-                )
-                return
-
-            except Exception as e:
-                logging.warning(
-                    f"labwc session wrapping failed ({e}). Attempting direct launch."
-                )
-
-        logging.info(
-            f"Executing {mode.capitalize()} mode command: {' '.join(final_cmd)}"
+    # 5. Prepare mode-specific environment variables (always, for all launch paths).
+    env = os.environ.copy()
+    audio_idx = _discover_audio_device()
+    env["SMARTFRAME_AUDIO_DEVICE"] = str(
+        audio_idx if audio_idx is not None else ""
+    )
+    env["SMARTFRAME_DEBUG"] = "1" if DEBUG_MODE else "0"
+    if mode == "mirror":
+        env["MIRROR_URL"] = config.get("magic_mirror", {}).get(
+            "url", "http://localhost:8080"
         )
-        current_process = subprocess.Popen(final_cmd, start_new_session=True)
+
+    # 6. Ensure a display session exists.
+    setup_display_env()
+
+    if not os.environ.get("WAYLAND_DISPLAY") and not os.environ.get("DISPLAY"):
+        # No external display server — start or reuse persistent labwc compositor
+        try:
+            wayland_display = _ensure_labwc()
+            env["WAYLAND_DISPLAY"] = wayland_display
+        except Exception as e:
+            logging.warning(
+                f"Persistent labwc session failed ({e}). Attempting direct launch."
+            )
+
+    # 7. Launch the mode process.
+    logging.info(f"Launching '{mode}' mode (cmd: {' '.join(base_cmd)}).")
+    current_process = subprocess.Popen(
+        base_cmd, env=env, start_new_session=True, stdout=None, stderr=None
+    )
 
 
 # MQTT Callbacks
@@ -1160,6 +1245,7 @@ def signal_handler(sig, frame):
     if audio_monitor_thread:
         audio_monitor_thread.running = False
     stop_current_mode()
+    _stop_labwc()
     sys.exit(0)
 
 
@@ -1205,6 +1291,9 @@ if __name__ == "__main__":
     # We run this in a thread because ddcutil can occasionally hang if the I2C bus is locked,
     # and we don't want to block the entire orchestrator startup.
     threading.Thread(target=set_display_power, args=(False,), daemon=True).start()
+
+    # Pre-discover audio device in background (avoids 1-2s probe on first mode switch)
+    threading.Thread(target=_discover_audio_device, daemon=True).start()
 
     # 2. Start command worker thread (Handle all transitions sequentially)
     worker = threading.Thread(target=command_worker, daemon=True)
@@ -1254,9 +1343,10 @@ if __name__ == "__main__":
                         
                     if not is_active:
                         logging.error(f"FAIL-SAFE: Mode process '{current_mode}' exited (code {poll_res}). Resetting to 'off'.")
+                        current_process = None
+                        _stop_labwc()
                         set_display_power(False)
                         current_mode = "off"
-                        current_process = None
                         if mqtt_client and mqtt_client.is_connected():
                             mqtt_client.publish(MQTT_STATE_TOPIC, current_mode, retain=True)
 
@@ -1294,6 +1384,7 @@ if __name__ == "__main__":
         logging.critical(f"FATAL: Orchestrator loop crashed: {e}")
     finally:
         stop_current_mode()
+        _stop_labwc()
         set_display_power(False)
         if mqtt_client:
             mqtt_client.loop_stop()
