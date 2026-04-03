@@ -34,9 +34,9 @@ DEVICE_INDEX_ENV = os.environ.get("SMARTFRAME_AUDIO_DEVICE")
 if DEVICE_INDEX_ENV and DEVICE_INDEX_ENV != "None" and DEVICE_INDEX_ENV != "":
     DEVICE_INDEX = int(DEVICE_INDEX_ENV)
 
-# Audio Configuration (High-Performance Smoothing)
-CHUNK_READ = 1024  # Small chunks for high-speed ~47Hz UI updates
-FFT_SIZE = 8192    # High-precision 8k FFT for maximum visual resolution
+# Audio Configuration (Ideal Balancing for Zero 2 WH)
+CHUNK_READ = 1536  # Optimized speed (~31Hz updates)
+FFT_SIZE = 8192  # High-fidelity 8k FFT for maximum visual resolution
 FORMAT = pyaudio.paInt16
 CHANNELS = 1
 SAMPLE_RATE = 48000
@@ -245,6 +245,8 @@ try:
         return w
 
     a_gains = get_a_weighting_gains(SAMPLE_RATE, FFT_SIZE)
+    # fft_norm will be calculated after fft_window is defined
+
     dt = CHUNK_READ / SAMPLE_RATE
     fast_alpha = 1.0 - np.exp(-dt / 0.125)  # 125ms FAST integration time
 
@@ -278,20 +280,22 @@ ema_rms_a = 0.0
 ema_rms_z = 0.0
 
 # --- SPECTRUM ANALYZER CONFIGURATION ---
-NUM_BANDS = 120  # Increased for higher visual density (Mastering Grade)
+NUM_BANDS = 120  # high density (Mastering Grade)
 MIN_FREQ = 25
-MAX_FREQ = 24000
+MAX_FREQ = 22500  # Capped at 22.5kHz to eliminate Nyquist noise artifacts
 MIN_DB = 65
 MAX_DB = 145  # Balanced range for high-energy music
-# Smoothing adjusted for ultra-reactive and smooth ~47Hz updates
-SMOOTHING_FACTOR = 0.92  # Slightly faster decay for a more 'alive' feel
-RISE_SMOOTHING = 0.88    # High reactivity: 88% of the delta in a single frame
-CURVE_SMOOTHING = 0.88  # Reduced dampening on the visual curve for more impact
-PEAK_GRAVITY = 0.003     # Gravity adjusted for faster frame rate
-PEAK_MAX_SPEED = 0.05    # Max speed adjusted for faster frame rate
+
+# Smoothing adjusted for optimized (~31Hz) updates
+SMOOTHING_FACTOR = 0.85  # Natural decay for 31Hz baseline
+RISE_SMOOTHING = 0.95  # Ultra-Reactive: Sudden peaks are instant (95% delta)
+CURVE_SMOOTHING = 0.88  # Smooth curve for 'Liquid' visual feel
+PEAK_GRAVITY = 0.008  # Gravity adjusted for ~31Hz
+PEAK_MAX_SPEED = 0.08  # Max speed adjusted for ~31Hz
 NOISE_GATE_LOW = 0.12  # Stricter gate to remove baseline mic noise
 NOISE_GATE_MID = 0.08  # Gate for mid-ranges
-NOISE_GATE_HIGH = 0.05  # Surgical floor for clarity
+NOISE_GATE_HIGH = 0.12  # Stricter floor for brilliance octaves to combat tilt rise
+NOISE_GATE_EXTREME = 0.18 # Aggressive gating for near-Nyquist range
 
 # Professional Slope Setting: Increased to 4.0dB for better visual high-end energy
 SLOPE_DB_PER_OCTAVE = 4.0
@@ -301,7 +305,7 @@ HIGH_FREQ_BOOST = 4.5  # Reduced slightly to 4.5dB for ultra-high frequencies (>
 FREQ_RANGES = [
     {"name": "BASS", "min": 20, "max": 225, "level": 1, "color": (100, 150, 255)},
     {"name": "MIDS", "min": 225, "max": 2500, "level": 1, "color": (150, 255, 150)},
-    {"name": "TREBLE", "min": 2500, "max": 24000, "level": 1, "color": (255, 150, 100)},
+    {"name": "TREBLE", "min": 2500, "max": 22500, "level": 1, "color": (255, 150, 100)},
     {"name": "Sub", "min": 20, "max": 60, "level": 0, "color": (80, 120, 220)},
     {"name": "Low", "min": 60, "max": 250, "level": 0, "color": (100, 140, 240)},
     {"name": "Low-Mid", "min": 250, "max": 500, "level": 0, "color": (120, 220, 120)},
@@ -317,7 +321,7 @@ FREQ_RANGES = [
     {
         "name": "Brilliance",
         "min": 10000,
-        "max": 24000,
+        "max": 22500,
         "level": 0,
         "color": (240, 150, 80),
     },
@@ -353,6 +357,10 @@ peak_heights = np.zeros(NUM_BANDS)
 
 # Blackman-Harris window for ultra-low spectral leakage (Mastering grade)
 fft_window = np.blackman(FFT_SIZE)
+
+# Pre-calculate Parseval's normalization factor for frequency-domain RMS
+# (compensates for window energy loss and FFT scaling)
+fft_norm = 1.0 / (FFT_SIZE * np.sqrt(max(1e-12, np.mean(fft_window**2))))
 
 # Calculate professional visual tilt based on the requested slope
 # We use 1kHz as the zero-crossing reference point
@@ -472,22 +480,21 @@ while running:
 
             # 2. DC/VLF Removal (Low-cut at 1Hz instead of 100Hz for user request)
             fft_complex[freqs < 1] = 0
+            # Remove Nyquist noise spikes and ultra-high digital jitter (Above 22.5kHz)
+            # This solves the "white peak at 24kHz" issue reported on I2S microphones.
+            fft_complex[freqs > 22500] = 0
 
-            # 3. Z-weighted (Raw) RMS
-            # Time-domain approach (Original)
-            data_clean = np.fft.irfft(fft_complex)
-            z_rms = np.sqrt(np.mean(data_clean**2))
+            # 3. Z-weighted (Raw) RMS in Frequency Domain (Parseval's Theorem)
+            # This is MUCH faster on Pi Zero 2 than time-domain irfft
+            mag_sq = np.abs(fft_complex) ** 2
+            # Sum energy (compensating for rfft symmetry)
+            total_energy = mag_sq[0] + 2 * np.sum(mag_sq[1:-1]) + mag_sq[-1]
+            z_rms = np.sqrt(max(1e-12, total_energy)) * fft_norm
 
-            # [Future reference: Frequency-domain RMS for Zero 2 optimization]
-            # z_rms = np.sqrt(np.sum(np.abs(fft_complex)**2) / (len(data)**2))
-
-            # 4. A-Weighted RMS (Original)
-            fft_aw = fft_complex * a_gains
-            data_aw = np.fft.irfft(fft_aw)
-            a_rms = np.sqrt(np.mean(data_aw**2))
-
-            # [Future reference: Frequency-domain A-RMS for Zero 2 optimization]
-            # a_rms = np.sqrt(np.sum(np.abs(fft_aw)**2) / (len(data)**2))
+            # 4. A-Weighted RMS in Frequency Domain
+            mag_sq_aw = np.abs(fft_complex * a_gains) ** 2
+            total_energy_aw = mag_sq_aw[0] + 2 * np.sum(mag_sq_aw[1:-1]) + mag_sq_aw[-1]
+            a_rms = np.sqrt(max(1e-12, total_energy_aw)) * fft_norm
 
             # Fast Integration (EMA)
             if ema_rms_z == 0:
@@ -569,8 +576,10 @@ while running:
                     threshold = NOISE_GATE_LOW
                 elif f_c < 4000:
                     threshold = NOISE_GATE_MID
-                else:
+                elif f_c < 12000:
                     threshold = NOISE_GATE_HIGH
+                else:
+                    threshold = NOISE_GATE_EXTREME
 
                 if bar_heights[i] < threshold:
                     bar_heights[i] = 0
@@ -641,7 +650,7 @@ while running:
                     (2000, 160, 255, 160),  # Hi-Mid
                     (5000, 240, 200, 120),  # Highs
                     (10000, 240, 150, 80),  # Brilliance
-                    (24000, 220, 100, 60),  # Extended Brilliance
+                    (22500, 220, 100, 60),  # Extended Brilliance
                 ]
                 c = w[-1][1:]
                 for j in range(len(w) - 1):
@@ -678,22 +687,22 @@ while running:
                 else:
                     bar_alpha = 140  # Semi-transparent bars
 
-                if h > 4:
-                    pygame.draw.rect(
-                        overlay_surface,
-                        (*final_color, bar_alpha),
-                        (x, analyzer_y_bottom - h, bar_width, h),
-                        border_radius=4,
-                    )
+                    if h > 4:
+                        pygame.draw.rect(
+                            overlay_surface,
+                            (*final_color, bar_alpha),
+                            (x, analyzer_y_bottom - h, bar_width, h),
+                            border_radius=4,
+                        )
 
-                # 3. Draw sharp peak indicators (Unity/Pro style)
-                if ph > 5:
-                    pygame.draw.rect(
-                        screen,
-                        (255, 255, 255),
-                        (x, analyzer_y_bottom - ph - 3, bar_width, 2),
-                        border_radius=1,
-                    )
+                    # 3. Draw sharp peak indicators (Unity/Pro style)
+                    if ph > 5:
+                        pygame.draw.rect(
+                            screen,
+                            (255, 255, 255),
+                            (x, analyzer_y_bottom - ph - 3, bar_width, 2),
+                            border_radius=1,
+                        )
 
             # Blit the accumulated alpha layer (Bars and Aura)
             screen.blit(overlay_surface, (0, 0))

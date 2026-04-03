@@ -1178,7 +1178,9 @@ if __name__ == "__main__":
     logging.info("--- SmartFrame Orchestrator starting ---")
 
     # 1. Initial State: Screen off until a mode starts
-    set_display_power(False)
+    # We run this in a thread because ddcutil can occasionally hang if the I2C bus is locked,
+    # and we don't want to block the entire orchestrator startup.
+    threading.Thread(target=set_display_power, args=(False,), daemon=True).start()
 
     # 2. Start command worker thread (Handle all transitions sequentially)
     worker = threading.Thread(target=command_worker, daemon=True)
@@ -1208,47 +1210,58 @@ if __name__ == "__main__":
     audio_monitor_thread.start()
 
     last_sync_time = time.time()
+    last_discovery_time = time.time()
 
     try:
         # --- GLOBAL FAIL-SAFE & SYNC LOOP (State Guardian) ---
         while True:
+            # Explicitly declare globals to ensure we are syncing the correct state
+            global current_mode, current_process
             now = time.time()
 
             # 1. Watchdog: Check if the current mode process has crashed unexpectedly
             if current_mode != "off" and current_process:
                 poll_res = current_process.poll()
                 if poll_res is not None:
-                    logging.error(
-                        f"FAIL-SAFE: Mode process '{current_mode}' exited unexpectedly (code {poll_res})."
-                    )
-                    set_display_power(False)
-                    current_mode = "off"
-                    current_process = None
-                    if mqtt_client and mqtt_client.is_connected():
-                        mqtt_client.publish(MQTT_STATE_TOPIC, current_mode, retain=True)
+                    # SMART CHECK: If dBA bridge is still being updated, don't declare crash yet
+                    bridge_file = "/tmp/smartframe_dba"
+                    is_active = False
+                    if os.path.exists(bridge_file) and (now - os.path.getmtime(bridge_file) < 5.0):
+                        is_active = True
+                        
+                    if not is_active:
+                        logging.error(f"FAIL-SAFE: Mode process '{current_mode}' exited (code {poll_res}). Resetting to 'off'.")
+                        set_display_power(False)
+                        current_mode = "off"
+                        current_process = None
+                        if mqtt_client and mqtt_client.is_connected():
+                            mqtt_client.publish(MQTT_STATE_TOPIC, current_mode, retain=True)
 
             # 2. Smart Detection: Sync state if we see 'phantom' activity
-            # If Audio Mode bridge is active but orchestrator thinks we are 'off'
             bridge_file = "/tmp/smartframe_dba"
             if os.path.exists(bridge_file):
                 try:
-                    # If bridge was updated in the last 10 seconds
-                    if now - os.path.getmtime(bridge_file) < 10.0:
+                    if now - os.path.getmtime(bridge_file) < 5.0:
                         if current_mode == "off":
-                            logging.warning("GUARDIAN: Audio bridge active but state is 'off'. Re-syncing to 'audio'.")
+                            logging.warning("GUARDIAN: Audio bridge active but state is 'off'. Syncing to 'audio'.")
                             current_mode = "audio"
                             if mqtt_client and mqtt_client.is_connected():
                                 mqtt_client.publish(MQTT_STATE_TOPIC, "audio", retain=True)
                 except Exception:
                     pass
 
-            # 3. Periodic UI Sync: Re-publish state every 30s to fix any HA display issues
-            if now - last_sync_time > 30.0:
+            # 3. Aggressive UI Sync: Re-publish state every 5s to keep HA dashboard accurate
+            if now - last_sync_time > 5.0:
                 if mqtt_client and mqtt_client.is_connected():
                     mqtt_client.publish(MQTT_STATE_TOPIC, current_mode, retain=True)
-                    # Also sync display attributes
                     mqtt_client.publish(MQTT_BRIGHTNESS_STATE_TOPIC, str(_working_methods.get("brightness", 100)), retain=True)
                 last_sync_time = now
+                
+            # 4. Global Re-announcement: Re-publish discovery every 5 mins
+            if now - last_discovery_time > 300.0:
+                if mqtt_client and mqtt_client.is_connected():
+                    publish_discovery_and_status(mqtt_client)
+                    last_discovery_time = now
 
             time.sleep(1)
 
