@@ -143,18 +143,58 @@ To install or update the service, run the install script:
 
 This generates the systemd service file from the template (`scripts/smartframe.service`), and installs/starts it.
 
+## Universal Display Control (DDC/CI & CEC)
+
+SmartFrame features high-performance hardware display management, allowing it to bypass the slow "No Signal" standby delay and control the monitor's internal settings directly via DDC/CI.
+
+### Core Features
+
+- **Instant Power**: Uses `ddcutil`/`cec-client` to put the monitor into true standby instantly.
+- **Hardware Brightness & Contrast**: Direct 0-100% control of the backlighting and contrast ratio.
+- **Color Temperature Profiles**: Switch between **Warm (5000K)**, **Natural (6500K)**, and **Cool (9300K)** via MQTT.
+- **Input Source Switching**: Electronically switch the monitor between the **Pi (HDMI-1)**, a secondary device (**HDMI-2**), or **DisplayPort**.
+- **Settings Persistence**: All display settings are cached and automatically restored when the screen powers on.
+
+### Required Tools
+
+Install the utilities to enable hardware-level control:
+
+```bash
+sudo apt update
+sudo apt install -y cec-utils ddcutil
+```
+
+*Note: The setup script automatically handles group permissions (`i2c`) for these tools.*
+
+## Performance & Persistent Caching
+
+To ensure maximum responsiveness on the Pi Zero 2 WH, SmartFrame uses an advanced multi-layer caching system:
+
+1. **Hardware Discovery Cache**: Remembers which power command (DDC or CEC) and which HDMI port (`HDMI-1`) works for your setup, skipping slow scans on boot.
+2. **Persistent Browser Profiles**: Both **Chromium** and **Cog** use persistent data directories (`.chromium_profile/` and `.cog_profile/`). This ensures that MagicMirror assets are cached locally and don't need to be redownloaded, significantly speeding up Mirror Mode transitions.
+3. **Binary Path Caching**: Remembers the exact location of tool binaries to eliminate redundant `which` shell calls.
+
 ## Home Assistant Integration
 
-SmartFrame natively supports **Home Assistant MQTT Auto-Discovery**. When connected to your MQTT broker, it automatically creates a `select` entity (`select.smartframe_mode`) in Home Assistant, populated with the currently available modes.
+SmartFrame natively supports **Home Assistant MQTT Auto-Discovery**. Once connected, it automatically creates a "Smart Frame" device with the following entities:
 
-Modes are automatically detected from the `modes/` directory (e.g., `audio`, `mirror`), along with the built-in `off` mode. You do *not* need to manually configure YAML in Home Assistant.
+| Entity Name | Type | Function |
+| :--- | :--- | :--- |
+| **SmartFrame Mode** | `select` | Switch between `off`, `mirror`, `audio`, etc. |
+| **SmartFrame Brightness** | `number` | Direct hardware backlight control (0-100%). |
+| **SmartFrame Contrast** | `number` | Direct hardware contrast control (0-100%). |
+| **SmartFrame Color Profile** | `select` | Switch between sRGB, Warm, Natural, and Cool. |
+| **SmartFrame Input** | `select` | Switch monitor input source (HDMI-1, HDMI-2, etc.). |
 
 ### Advanced MQTT Topics
 
-If you prefer manual configuration or integrating with other systems, the orchestrator uses the following topics (configurable in `config.yaml`):
+The orchestrator uses the following topics for integration with other systems (e.g., Node-RED):
 
-- `smartframe/set_mode` (Command topic to change active mode)
-- `smartframe/mode_state` (State topic showing current active mode)
-- `smartframe/status` (LWT availability topic: `online` or `offline`)
-- `smartframe/modes_available` (JSON list of dynamically detected available modes)
+- `smartframe/set_mode` / `smartframe/mode_state`
+- `smartframe/set_brightness` / `smartframe/brightness_state`
+- `smartframe/set_contrast` / `smartframe/contrast_state`
+- `smartframe/set_color_preset` / `smartframe/color_preset_state`
+- `smartframe/set_input_source` / `smartframe/input_source_state`
+- `smartframe/status` (LWT: `online`/`offline`)
+- `smartframe/modes_available` (JSON list of modes)
 

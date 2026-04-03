@@ -39,6 +39,12 @@ MQTT_AVAILABLE_MODES_TOPIC = mqtt_config.get('available_modes_topic', 'smartfram
 MQTT_DISCOVERY_PREFIX = mqtt_config.get('discovery_prefix', 'homeassistant')
 MQTT_BRIGHTNESS_COMMAND_TOPIC = mqtt_config.get('brightness_topic', 'smartframe/set_brightness')
 MQTT_BRIGHTNESS_STATE_TOPIC = mqtt_config.get('brightness_state_topic', 'smartframe/brightness_state')
+MQTT_CONTRAST_COMMAND_TOPIC = mqtt_config.get('contrast_topic', 'smartframe/set_contrast')
+MQTT_CONTRAST_STATE_TOPIC = mqtt_config.get('contrast_state_topic', 'smartframe/contrast_state')
+MQTT_COLOR_PRESET_COMMAND_TOPIC = mqtt_config.get('color_preset_topic', 'smartframe/set_color_preset')
+MQTT_COLOR_PRESET_STATE_TOPIC = mqtt_config.get('color_preset_state_topic', 'smartframe/color_preset_state')
+MQTT_INPUT_SOURCE_COMMAND_TOPIC = mqtt_config.get('input_source_topic', 'smartframe/set_input_source')
+MQTT_INPUT_SOURCE_STATE_TOPIC = mqtt_config.get('input_source_state_topic', 'smartframe/input_source_state')
 MQTT_USER = mqtt_config.get('username')
 MQTT_PASS = mqtt_config.get('password')
 
@@ -56,7 +62,10 @@ _working_methods = {
     'hdmi_output': None,
     'labwc_path': None,
     'hardware': [],
-    'brightness': 100
+    'brightness': 100,
+    'contrast': 50,
+    'color_preset': '6500 K',
+    'input_source': 'HDMI-1'
 }
 
 def _load_cache():
@@ -270,39 +279,93 @@ def set_display_power(state: bool):
         logging.error(f"Failed to set display power to {target}.")
     else:
         logging.info(f"Display set to {target} (Methods: {success_count})")
-        # If turned ON, restore last known brightness
+        # If turned ON, restore all last known settings
         if state:
             set_display_brightness(_working_methods.get('brightness', 100), force=True)
+            set_display_contrast(_working_methods.get('contrast', 50), force=True)
+            set_display_color_preset(_working_methods.get('color_preset', 'Natural (6500 K)'))
 
 def set_display_brightness(value: int, force=False):
     """Sets display brightness using ddcutil with caching."""
     global _working_methods
-    
-    # Clip value to 0-100
     value = max(0, min(100, int(value)))
-    
-    # Avoid redundant calls (unless forced, e.g. on Power On)
     if not force and _working_methods.get('brightness') == value:
         return True
-
     logging.info(f"Setting display brightness to {value}%...")
-    
-    # Strategy: ddcutil is the standard for HDMI
-    cmd = ['sudo', 'ddcutil', 'setvcp', '10', str(value)]
-    try:
-        # Use a short timeout so we don't hang the main thread
-        res = subprocess.run(cmd, capture_output=True, timeout=2.5)
-        if res.returncode == 0:
-            _working_methods['brightness'] = value
-            _save_cache()
-            
-            if mqtt_client and mqtt_client.is_connected():
-                mqtt_client.publish(MQTT_BRIGHTNESS_STATE_TOPIC, str(value), retain=True)
-            return True
-    except Exception as e:
-        logging.debug(f"Brightness control failed: {e}")
-    
+    if _run_vcp_command('10', str(value)):
+        _working_methods['brightness'] = value
+        _save_cache()
+        if mqtt_client and mqtt_client.is_connected():
+            mqtt_client.publish(MQTT_BRIGHTNESS_STATE_TOPIC, str(value), retain=True)
+        return True
     return False
+
+def set_display_contrast(value: int, force=False):
+    """Sets display contrast using ddcutil (VCP 12)."""
+    global _working_methods
+    value = max(0, min(100, int(value)))
+    if not force and _working_methods.get('contrast') == value:
+        return True
+    logging.info(f"Setting display contrast to {value}%...")
+    if _run_vcp_command('12', str(value)):
+        _working_methods['contrast'] = value
+        _save_cache()
+        if mqtt_client and mqtt_client.is_connected():
+            mqtt_client.publish(MQTT_CONTRAST_STATE_TOPIC, str(value), retain=True)
+        return True
+    return False
+
+def set_display_color_preset(preset_name: str):
+    """Sets display color preset (VCP 14)."""
+    global _working_methods
+    presets = {
+        'sRGB': '01',
+        'Natural (6500 K)': '05',
+        'Warm (5000 K)': '04',
+        'Cool (9300 K)': '08'
+    }
+    hex_val = presets.get(preset_name)
+    if not hex_val:
+        return False
+    logging.info(f"Setting display color preset to {preset_name} ({hex_val})...")
+    if _run_vcp_command('14', '0x' + hex_val):
+        _working_methods['color_preset'] = preset_name
+        _save_cache()
+        if mqtt_client and mqtt_client.is_connected():
+            mqtt_client.publish(MQTT_COLOR_PRESET_STATE_TOPIC, preset_name, retain=True)
+        return True
+    return False
+
+def set_display_input_source(source_name: str):
+    """Sets display input source (VCP 60)."""
+    global _working_methods
+    sources = {
+        'HDMI-1': '11',
+        'HDMI-2': '12',
+        'DisplayPort-1': '0f',
+        'VGA': '01'
+    }
+    hex_val = sources.get(source_name)
+    if not hex_val:
+        return False
+    logging.info(f"Switching input source to {source_name} ({hex_val})...")
+    if _run_vcp_command('60', '0x' + hex_val):
+        _working_methods['input_source'] = source_name
+        _save_cache()
+        if mqtt_client and mqtt_client.is_connected():
+            mqtt_client.publish(MQTT_INPUT_SOURCE_STATE_TOPIC, source_name, retain=True)
+        return True
+    return False
+
+def _run_vcp_command(vcp_code, value):
+    """Helper to run a ddcutil setvcp command."""
+    cmd = ['sudo', 'ddcutil', 'setvcp', vcp_code, value]
+    try:
+        res = subprocess.run(cmd, capture_output=True, timeout=3.5)
+        return res.returncode == 0
+    except Exception as e:
+        logging.debug(f"ddcutil VCP {vcp_code} failed: {e}")
+        return False
 
     return False
 
@@ -491,26 +554,38 @@ def publish_discovery_and_status(client):
     }
     client.publish(discovery_topic, json.dumps(discovery_payload), retain=True)
 
-    # 4. Publish Discovery for Brightness
-    brightness_discovery_topic = f"{MQTT_DISCOVERY_PREFIX}/number/smartframe/brightness/config"
-    brightness_payload = {
-        "name": "SmartFrame Brightness",
-        "unique_id": "smartframe_brightness_control",
-        "command_topic": MQTT_BRIGHTNESS_COMMAND_TOPIC,
-        "state_topic": MQTT_BRIGHTNESS_STATE_TOPIC,
-        "min": 0,
-        "max": 100,
-        "step": 5,
-        "unit_of_measurement": "%",
-        "icon": "mdi:brightness-6",
-        "availability": [{"topic": MQTT_STATUS_TOPIC}],
-        "device": {
-            "identifiers": ["smartframe_orchestrator"]
-        }
-    }
-    client.publish(brightness_discovery_topic, json.dumps(brightness_payload), retain=True)
+    # 4. Publish Discovery for Brightness, Contrast, Color Preset, and Input
+    client.publish(f"{MQTT_DISCOVERY_PREFIX}/number/smartframe/brightness/config", json.dumps({
+        "name": "SmartFrame Brightness", "unique_id": "sf_brightness",
+        "command_topic": MQTT_BRIGHTNESS_COMMAND_TOPIC, "state_topic": MQTT_BRIGHTNESS_STATE_TOPIC,
+        "min": 0, "max": 100, "step": 5, "unit_of_measurement": "%", "icon": "mdi:brightness-6",
+        "availability": [{"topic": MQTT_STATUS_TOPIC}], "device": {"identifiers": ["smartframe_orchestrator"]}
+    }), retain=True)
+
+    client.publish(f"{MQTT_DISCOVERY_PREFIX}/number/smartframe/contrast/config", json.dumps({
+        "name": "SmartFrame Contrast", "unique_id": "sf_contrast",
+        "command_topic": MQTT_CONTRAST_COMMAND_TOPIC, "state_topic": MQTT_CONTRAST_STATE_TOPIC,
+        "min": 0, "max": 100, "step": 5, "unit_of_measurement": "%", "icon": "mdi:contrast",
+        "availability": [{"topic": MQTT_STATUS_TOPIC}], "device": {"identifiers": ["smartframe_orchestrator"]}
+    }), retain=True)
+
+    client.publish(f"{MQTT_DISCOVERY_PREFIX}/select/smartframe/color_preset/config", json.dumps({
+        "name": "SmartFrame Color Profile", "unique_id": "sf_color_preset",
+        "command_topic": MQTT_COLOR_PRESET_COMMAND_TOPIC, "state_topic": MQTT_COLOR_PRESET_STATE_TOPIC,
+        "options": ['sRGB', 'Natural (6500 K)', 'Warm (5000 K)', 'Cool (9300 K)'],
+        "icon": "mdi:palette", "availability": [{"topic": MQTT_STATUS_TOPIC}],
+        "device": {"identifiers": ["smartframe_orchestrator"]}
+    }), retain=True)
+
+    client.publish(f"{MQTT_DISCOVERY_PREFIX}/select/smartframe/input_source/config", json.dumps({
+        "name": "SmartFrame Input", "unique_id": "sf_input",
+        "command_topic": MQTT_INPUT_SOURCE_COMMAND_TOPIC, "state_topic": MQTT_INPUT_SOURCE_STATE_TOPIC,
+        "options": ['HDMI-1', 'HDMI-2', 'DisplayPort-1', 'VGA'],
+        "icon": "mdi:video-input-hdmi", "availability": [{"topic": MQTT_STATUS_TOPIC}],
+        "device": {"identifiers": ["smartframe_orchestrator"]}
+    }), retain=True)
     
-    logging.info("Published Home Assistant MQTT discovery payloads (Mode + Brightness).")
+    logging.info("Published Home Assistant MQTT discovery payloads (Universal Display Control).")
 
 def on_connect(client, userdata, _connect_flags, reason_code, _properties):
     global current_mode
@@ -518,7 +593,10 @@ def on_connect(client, userdata, _connect_flags, reason_code, _properties):
         logging.info("Connected to MQTT broker.")
         client.subscribe(MQTT_COMMAND_TOPIC)
         client.subscribe(MQTT_BRIGHTNESS_COMMAND_TOPIC)
-        logging.info(f"Subscribed to command topics: {MQTT_COMMAND_TOPIC}, {MQTT_BRIGHTNESS_COMMAND_TOPIC}")
+        client.subscribe(MQTT_CONTRAST_COMMAND_TOPIC)
+        client.subscribe(MQTT_COLOR_PRESET_COMMAND_TOPIC)
+        client.subscribe(MQTT_INPUT_SOURCE_COMMAND_TOPIC)
+        logging.info("Subscribed to all universal display control topics.")
         
         publish_discovery_and_status(client)
         
@@ -526,8 +604,11 @@ def on_connect(client, userdata, _connect_flags, reason_code, _properties):
         if current_mode:
             client.publish(MQTT_STATE_TOPIC, current_mode, retain=True)
         
-        # Publish current brightness on connect
+        # Publish current display settings on connect
         client.publish(MQTT_BRIGHTNESS_STATE_TOPIC, str(_working_methods.get('brightness', 100)), retain=True)
+        client.publish(MQTT_CONTRAST_STATE_TOPIC, str(_working_methods.get('contrast', 50)), retain=True)
+        client.publish(MQTT_COLOR_PRESET_STATE_TOPIC, _working_methods.get('color_preset', 'Natural (6500 K)'), retain=True)
+        client.publish(MQTT_INPUT_SOURCE_STATE_TOPIC, _working_methods.get('input_source', 'HDMI-1'), retain=True)
     else:
         logging.error(f"Failed to connect, reason code: {reason_code}")
         if reason_code in ["Not authorized", "Bad user name or password"]:
@@ -545,10 +626,18 @@ def on_message(client, userdata, msg):
             logging.warning(f"Invalid payload '{payload}'. Available modes: {available_modes}")
     elif msg.topic == MQTT_BRIGHTNESS_COMMAND_TOPIC:
         try:
-            val = int(payload)
-            set_display_brightness(val)
+            set_display_brightness(int(payload))
         except ValueError:
             logging.warning(f"Invalid brightness payload: {payload}")
+    elif msg.topic == MQTT_CONTRAST_COMMAND_TOPIC:
+        try:
+            set_display_contrast(int(payload))
+        except ValueError:
+            logging.warning(f"Invalid contrast payload: {payload}")
+    elif msg.topic == MQTT_COLOR_PRESET_COMMAND_TOPIC:
+        set_display_color_preset(payload)
+    elif msg.topic == MQTT_INPUT_SOURCE_COMMAND_TOPIC:
+        set_display_input_source(payload)
 
 def signal_handler(sig, frame):
     logging.info(f"Signal {sig} received. Shutting down orchestrator...")
