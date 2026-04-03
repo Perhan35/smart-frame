@@ -385,9 +385,21 @@ while running:
             print(f"Audio read error: {e}")
             break
     else:
-        # Error message if microphone is unresponsive, keeping dark background to avoid screen flash
+        # 1. Draw a stylized "No Mic" icon in the top-left corner
+        icon_surface = pygame.Surface((100, 100), pygame.SRCALPHA)
+        # Draw Mic Body (Rounded Rect)
+        pygame.draw.rect(icon_surface, (100, 100, 100), (35, 20, 30, 45), border_radius=15)
+        # Draw Mic Stand
+        pygame.draw.line(icon_surface, (100, 100, 100), (50, 65), (50, 80), 3)
+        pygame.draw.line(icon_surface, (100, 100, 100), (35, 80), (65, 80), 3)
+        # Draw the Warning Slash (Red)
+        pygame.draw.line(icon_surface, (255, 50, 50), (20, 20), (80, 80), 6)
+        
+        screen.blit(icon_surface, (50, 50))
+        
+        # 2. Render localized error message
         error_text = font_medium.render(
-            "Waiting for I2S Microphone Signal...", True, (150, 150, 150)
+            "Waiting for I2S Microphone Signal...", True, (120, 120, 120)
         )
         text_rect = error_text.get_rect(
             center=(screen.get_width() / 2, screen.get_height() / 2)

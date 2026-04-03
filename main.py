@@ -48,6 +48,9 @@ MQTT_INPUT_SOURCE_STATE_TOPIC = mqtt_config.get('input_source_state_topic', 'sma
 MQTT_USER = mqtt_config.get('username')
 MQTT_PASS = mqtt_config.get('password')
 
+MODES_DIR = os.path.join(os.path.dirname(__file__), 'modes')
+
+# Globals for state management
 current_process = None
 current_mode = None
 mqtt_client = None
@@ -65,8 +68,67 @@ _working_methods = {
     'brightness': 100,
     'contrast': 50,
     'color_preset': '6500 K',
-    'input_source': 'HDMI-1'
+    'input_source': 'HDMI-1',
+    'audio_device': None
 }
+
+available_modes_cache = []
+
+def get_available_modes():
+    """List all available mode names from the modes directory (with memory caching)."""
+    global available_modes_cache
+    if available_modes_cache:
+        return available_modes_cache
+    
+    modes = ['off']
+    if os.path.exists(MODES_DIR):
+        for item in os.listdir(MODES_DIR):
+            if os.path.isdir(os.path.join(MODES_DIR, item)):
+                modes.append(item)
+    available_modes_cache = modes
+    return modes
+
+def _discover_audio_device():
+    """Finds the best audio input device once and caches it (saves 1-2s of hardware probing)."""
+    global _working_methods
+    if _working_methods.get('audio_device') is not None:
+        return _working_methods['audio_device']
+        
+    try:
+        import pyaudio
+        p = pyaudio.PyAudio()
+        found_index = None
+        
+        # Priority 1: Specifically look for the I2S hardware
+        for i in range(p.get_device_count()):
+            try:
+                info = p.get_device_info_by_index(i)
+                name = info.get('name', '').lower()
+                if info.get('maxInputChannels', 0) > 0:
+                    if any(x in name for x in ['i2s', 'googlevoicehat', 'mono', 'inmp']):
+                        found_index = i
+                        logging.info(f"Discovered I2S hardware mic: {info.get('name')} (index {i}).")
+                        break
+            except Exception:
+                continue
+                    
+        # Priority 2: Fallback to default input
+        if found_index is None:
+            try:
+                found_index = p.get_default_input_device_info().get('index')
+            except Exception:
+                pass
+            
+        p.terminate()
+        if found_index is not None:
+            _working_methods['audio_device'] = found_index
+            _save_cache()
+            return found_index
+    except ImportError:
+        pass
+    except Exception as e:
+        logging.debug(f"Audio discovery failed: {e}")
+    return None
 
 def _load_cache():
     global _working_methods
@@ -403,16 +465,6 @@ def stop_current_mode():
         global _display_env_detected
         _display_env_detected = False # Allow re-detection for the next mode
 
-def get_available_modes():
-    modes = ['off']
-    modes_dir = os.path.join(os.path.dirname(__file__), 'modes')
-    if os.path.isdir(modes_dir):
-        for f in os.listdir(modes_dir):
-            if f.endswith('_mode.py') or f.endswith('_mode.sh'):
-                mode_name = f.replace('_mode.py', '').replace('_mode.sh', '')
-                if mode_name not in modes:
-                    modes.append(mode_name)
-    return sorted(modes)
 
 def _get_labwc_config():
     """Create a temporary labwc config to hide the cursor and optimize for kiosk mode."""
@@ -490,8 +542,14 @@ def start_mode(mode):
                 global labwc_config_dir
                 labwc_config_dir = _get_labwc_config()
                 
-                # Faster path: Pass URLs to scripts directly via env vars
+                # Faster path: Pass settings to scripts directly via env vars
                 env = os.environ.copy()
+                
+                # Auto-discover and cache the audio input device
+                audio_idx = _discover_audio_device()
+                env['SMARTFRAME_AUDIO_DEVICE'] = str(audio_idx if audio_idx is not None else '')
+                env['SMARTFRAME_DEBUG'] = '1' if DEBUG_MODE else '0'
+                
                 if mode == 'mirror':
                     env['MIRROR_URL'] = config.get('magic_mirror', {}).get('url', 'http://localhost:8080')
                 

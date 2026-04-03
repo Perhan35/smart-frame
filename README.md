@@ -118,9 +118,9 @@ The setup script creates `config.yaml` from `config.example.yaml` automatically.
 - **MQTT**: Set up your broker IP, port, and credentials.
 - **MagicMirror**: Set the URL corresponding to your local MagicMirror instance.
 - **Audio Mode**:
-  - `device_index`: Specific ALSA microphone index ID (if required).
   - `threshold_db_warning`: Volume (in dB) where the dB text will turn yellow/orange (default: 60).
   - `threshold_db_error`: Volume (in dB) where the dB text will turn red (default: 85).
+  - `device_index`: (Optional) Manual ALSA microphone index. If left blank, the SmartFrame will automatically discover and cache the best device (e.g. INMP441 I2S) for you.
 
 > **Note:** The setup script will warn you if `config.yaml` still has placeholder values and skip the service installation prompt until you configure it.
 
@@ -171,8 +171,9 @@ sudo apt install -y cec-utils ddcutil
 To ensure maximum responsiveness on the Pi Zero 2 WH, SmartFrame uses an advanced multi-layer caching system:
 
 1. **Hardware Discovery Cache**: Remembers which power command (DDC or CEC) and which HDMI port (`HDMI-1`) works for your setup, skipping slow scans on boot.
-2. **Persistent Browser Profiles**: Both **Chromium** and **Cog** use persistent data directories (`.chromium_profile/` and `.cog_profile/`). This ensures that MagicMirror assets are cached locally and don't need to be redownloaded, significantly speeding up Mirror Mode transitions.
-3. **Binary Path Caching**: Remembers the exact location of tool binaries to eliminate redundant `which` shell calls.
+2. **Self-Configuring Audio**: The orchestrator scans for the best microphone on the first run. It caches the hardware index in `.smartframe_cache`, eliminating the 1-2 second delay when switching to Audio Mode.
+3. **Persistent Browser Profiles**: Both **Chromium** and **Cog** use persistent data directories (`.chromium_profile/` and `.cog_profile/`). This ensures that MagicMirror assets are cached locally.
+4. **Binary Path Caching**: Remembers the exact location of tool binaries to eliminate redundant `which` shell calls.
 
 ## Home Assistant Integration
 

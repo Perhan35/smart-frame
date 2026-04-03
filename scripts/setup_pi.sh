@@ -56,8 +56,15 @@ else
 fi
 
 echo ""
-echo "== Configuring Audio Input Device =="
-python3 scripts/list_audio_devices.py || echo "Warning: Audio device selection failed."
+echo "== Audio Input Configuration =="
+echo "SmartFrame can automatically discover your I2S microphone during its first run."
+echo "However, if you have multiple microphones or a complex setup, you can select one manually now."
+read -rp "Would you like to manually select your audio input device? [y/N] (Default is No) " audio_choice
+if [[ "$audio_choice" =~ ^[Yy]$ ]]; then
+    python3 scripts/list_audio_devices.py || echo "Warning: Audio device selection failed."
+else
+    echo "Using Auto-Discovery. SmartFrame will detect the best device on startup."
+fi
 
 echo ""
 echo "=== Setup complete ==="
