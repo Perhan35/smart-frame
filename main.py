@@ -52,7 +52,7 @@ MODES_DIR = os.path.join(os.path.dirname(__file__), 'modes')
 
 # Globals for state management
 current_process = None
-current_mode = None
+current_mode = 'off'
 mqtt_client = None
 labwc_config_dir = None
 
@@ -436,7 +436,7 @@ def _run_vcp_command(vcp_code, value):
 def stop_current_mode():
     global current_process
     if current_process:
-        logging.info(f"Stopping current mode: {current_mode}")
+        logging.info("Stopping current mode process...")
         try:
             # Kill the entire process group
             os.killpg(os.getpgid(current_process.pid), signal.SIGTERM)
@@ -486,30 +486,35 @@ def _get_labwc_config():
     return config_dir
 
 def start_mode(mode):
-    global current_process
-    global current_mode
-    global mqtt_client
+    global current_process, current_mode, mqtt_client
     
+    mode = mode.lower()
     if mode == current_mode:
+        # Always publish state confirmation even if already in mode to keep HA in sync
+        if mqtt_client and mqtt_client.is_connected():
+            mqtt_client.publish(MQTT_STATE_TOPIC, current_mode, retain=True)
         return
     
-    logging.info(f"Transitioning to mode: {mode}")
+    logging.info(f"Transitioning mode: {current_mode} -> {mode}")
 
     # 1. Stop the current mode first.
-    # This releases DRM master, X11 sockets, and TTY resources.
     stop_current_mode()
+    
+    # 2. Update state variable and publish intent immediately
+    # This fixes the 'previous state' glitch by confirming the change before the sleep
+    current_mode = mode
+    if mqtt_client and mqtt_client.is_connected():
+        mqtt_client.publish(MQTT_STATE_TOPIC, current_mode, retain=True)
     
     # Small delay for kernel/TTY/DRM handshake settling
     time.sleep(1.5)
 
-    current_mode = mode
-    
     if mode == 'off':
         logging.info("Ensuring display power is OFF.")
         set_display_power(False)
+        return # State already published above
     else:
         # Pre-emptive power ON (so the next mode doesn't start in the dark)
-        # Note: If labwc is about to start, this might use legacy/fb methods, which is fine.
         set_display_power(True)
         
         modes_dir = os.path.join(os.path.dirname(__file__), 'modes')
@@ -526,9 +531,11 @@ def start_mode(mode):
             logging.warning(f"Unknown mode: {mode}. Available modes: {available}")
             current_mode = 'off'
             set_display_power(False)
+            if mqtt_client and mqtt_client.is_connected():
+                mqtt_client.publish(MQTT_STATE_TOPIC, current_mode, retain=True)
             return
 
-        # 2. Intelligent Session Wrapping:
+        # 3. Intelligent Session Wrapping:
         setup_display_env()
         final_cmd = base_cmd
         
@@ -544,7 +551,6 @@ def start_mode(mode):
                 global labwc_config_dir
                 labwc_config_dir = _get_labwc_config()
                 
-                # Faster path: Pass settings to scripts directly via env vars
                 env = os.environ.copy()
                 
                 # Auto-discover and cache the audio input device
@@ -556,22 +562,15 @@ def start_mode(mode):
                     env['MIRROR_URL'] = config.get('magic_mirror', {}).get('url', 'http://localhost:8080')
                 
                 cmd_str = ' '.join(base_cmd)
-                # Use XDG_CONFIG_HOME for robust config isolation across all labwc versions
                 env['XDG_CONFIG_HOME'] = labwc_config_dir
                 env['XCURSOR_SIZE'] = '0'
                 env['COG_PLATFORM_FDO_SHOW_CURSOR'] = '0'
-                # Pass MIRROR_URL and other config to modes to avoid them re-parsing the large config.yaml
                 env['MIRROR_URL'] = config.get('magic_mirror', {}).get('url', 'http://localhost:8080')
                 env['SMARTFRAME_AUDIO_DEVICE'] = str(config.get('audio', {}).get('device_index', ''))
                 
                 final_cmd = [labwc_bin, '-s', cmd_str]
-                logging.info(f"Wrapping mode '{mode}' in a managed Wayland session (labwc) with isolated XDG_CONFIG_HOME.")
+                logging.info(f"Wrapping mode '{mode}' in a managed Wayland session (labwc).")
                 current_process = subprocess.Popen(final_cmd, env=env, start_new_session=True, stdout=None, stderr=None)
-                
-                # Update MQTT state before returning
-                if mqtt_client and current_mode:
-                    mqtt_client.publish(MQTT_STATE_TOPIC, current_mode, retain=True)
-                    logging.info(f"Published state: {current_mode} to {MQTT_STATE_TOPIC}")
                 return
 
             except Exception as e:
@@ -580,11 +579,6 @@ def start_mode(mode):
 
         logging.info(f"Executing {mode.capitalize()} mode command: {' '.join(final_cmd)}")
         current_process = subprocess.Popen(final_cmd, start_new_session=True)
-
-    # 4. Synchronize state with MQTT
-    if mqtt_client and current_mode:
-        mqtt_client.publish(MQTT_STATE_TOPIC, current_mode, retain=True)
-        logging.info(f"Published state: {current_mode} to {MQTT_STATE_TOPIC}")
 
 # MQTT Callbacks
 def publish_discovery_and_status(client):
