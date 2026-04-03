@@ -82,11 +82,13 @@ def get_available_modes():
     
     modes = ['off']
     if os.path.exists(MODES_DIR):
-        for item in os.listdir(MODES_DIR):
-            if os.path.isdir(os.path.join(MODES_DIR, item)):
-                modes.append(item)
-    available_modes_cache = modes
-    return modes
+        for f in os.listdir(MODES_DIR):
+            if f.endswith('_mode.py') or f.endswith('_mode.sh'):
+                mode_name = f.replace('_mode.py', '').replace('_mode.sh', '')
+                if mode_name not in modes:
+                    modes.append(mode_name)
+    available_modes_cache = sorted(modes)
+    return available_modes_cache
 
 def _discover_audio_device():
     """Finds the best audio input device once and caches it (saves 1-2s of hardware probing)."""
