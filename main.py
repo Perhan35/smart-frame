@@ -289,8 +289,8 @@ def set_display_power(state: bool):
 
     def run_strategy(name, cmd):
         try:
-            # Short timeout for cached methods, longer for discovery
-            timeout = 1.5 if name in _working_methods['hardware'] else 3.5
+            # Short timeout for cached methods, longer for discovery (3.5s is safe for Pi Zero I2C)
+            timeout = 3.5
             res = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
             if res.returncode != 0:
                 err = res.stderr.strip()
@@ -329,20 +329,34 @@ def set_display_power(state: bool):
                 break
 
     # 2. Execute Hardware Layer
+    hardware_success = False
+    
+    # Try any previously working hardware methods from cache
     if _working_methods['hardware']:
         for name in list(_working_methods['hardware']):
             name_check, cmd, _ = next((s for s in hardware_strategies if s[0] == name), (None, None, None))
             if name_check and run_strategy(name_check, cmd):
                 success_count += 1
+                hardware_success = True
             else:
+                logging.warning(f"Cached display method '{name}' failed, removing from cache.")
                 _working_methods['hardware'].remove(name)
                 needs_save = True
-    else:
+
+    # If no cached hardware methods worked, try discovering and executing ALL possible hardware strategies
+    if not hardware_success:
         for name, cmd, condition in hardware_strategies:
+            # Skip strategies we *just* tried and failed in the cached block
+            if name in _working_methods['hardware']:
+                continue
+                
             if condition() and run_strategy(name, cmd):
+                logging.info(f"Discovered new display control strategy: {name}")
                 _working_methods['hardware'].append(name)
                 success_count += 1
+                hardware_success = True
                 needs_save = True
+                # Break early only for premium methods (DDC/CI or CEC) to avoid double-processing
                 if name in ["DDC/CI (Fast Off)", "HDMI-CEC"]:
                     break
 
