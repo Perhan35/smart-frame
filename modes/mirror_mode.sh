@@ -57,14 +57,18 @@ if [ "$BROWSER_TYPE" = "chromium" ]; then
         HAS_GPU=1
     fi
 
+    # Performance and suppression flags for Chromium (Deeply optimized for Pi Zero 2)
     # --no-sandbox: fix "Failed global descriptor lookup" on Pi kiosk
-    # --use-gl=egl: Resolve "eglCreateContext ES 3.0 failed" errors by forcing EGL
-    CHROME_FLAGS="--no-sandbox --noerrdialogs --disable-infobars --kiosk --hide-scrollbars --password-store=basic --check-for-update-interval=31536000 --no-memcheck --enable-low-end-device-mode --disable-site-isolation-trials --test-type --no-pings --disable-notifications --disable-sync --autoplay-policy=no-user-gesture-required --disable-background-networking --disable-component-update --disable-default-apps --disable-domain-reliability --disable-extensions --disable-client-side-phishing-detection --no-first-run --no-default-browser-check --disable-cloud-import --disable-breakpad --metrics-recording-only --disable-gcm-extension --disable-safe-browsing-extension-api --safebrowsing-disable-auto-update --safebrowsing-disable-download-protection --disable-features=Translate,OptimizationHints,MediaRouter,DialMediaRouteProvider,PrintPreview,OnDeviceModel,OptimizationGuideModelExecution,WebGPU,SkiaGraphite,WebRtcHideLocalIpsWithMdns,SafeBrowsing,GCM,OptimizationGuide,EnterpriseDataProtectionAnalysis --enable-zero-copy --use-gl=egl --ignore-certificate-errors --allow-running-insecure-content --remote-allow-origins=* --user-data-dir=$PROFILE_DIR --memory-pressure-thresholds=1,2 --js-flags='--max-old-space-size=128 --stack-size=1024' --disable-smooth-scrolling"
+    # --use-gl=egl-angle: Align with allowed implementations in the GPU log
+    # --disable-dev-shm-usage: Fixes "Failed global descriptor lookup: 7" and memory issues on low-RAM devices
+    # --use-mock-keychain: Avoids D-Bus/Identity/OSCrypt overhead and log spam
+    # --disk-cache-dir=/tmp: Massive speedup on Pi by putting cache in RAM instead of slow SD card
+    CHROME_FLAGS="--no-sandbox --noerrdialogs --disable-infobars --kiosk --hide-scrollbars --password-store=basic --use-mock-keychain --check-for-update-interval=31536000 --no-memcheck --enable-low-end-device-mode --disable-site-isolation-trials --test-type --no-pings --disable-notifications --disable-sync --autoplay-policy=no-user-gesture-required --disable-background-networking --disable-component-update --disable-default-apps --disable-domain-reliability --disable-extensions --disable-client-side-phishing-detection --no-first-run --no-default-browser-check --disable-cloud-import --disable-breakpad --metrics-recording-only --disable-gcm-extension --disable-gcm --disable-safe-browsing-extension-api --safebrowsing-disable-auto-update --safebrowsing-disable-download-protection --disable-features=Translate,OptimizationHints,MediaRouter,DialMediaRouteProvider,PrintPreview,OnDeviceModel,OptimizationGuideModelExecution,WebGPU,SkiaGraphite,WebRtcHideLocalIpsWithMdns,SafeBrowsing,GCM,OptimizationGuide,EnterpriseDataProtectionAnalysis,AudioServiceOutOfProcess,OptimizationGuideModelExecution,BackForwardCache,IsolateOrigins,SitePerProcess,Vulkan,BatteryStatus,NetworkQualityEstimator,PrivacySandboxSettings4,FedCm,InterestFeedContentSuggestions,SegmentationPlatform,PushMessaging,CloudMessaging --disable-variations-safe-mode --disable-dev-shm-usage --disable-gpu-watchdog --enable-zero-copy --use-gl=egl-angle --ignore-certificate-errors --allow-running-insecure-content --remote-allow-origins=* --user-data-dir=$PROFILE_DIR --memory-pressure-thresholds=1,2 --js-flags='--max-old-space-size=128 --stack-size=1024' --disable-smooth-scrolling --mute-audio --force-device-scale-factor=1 --disable-background-timer-throttling --disk-cache-dir=/tmp --disk-cache-size=20971520 --media-cache-size=1 --disable-policy-cloud-management --no-proxy-server --disable-gpu-shader-disk-cache --disable-vulkan"
 
     # Add hardware acceleration flags only if GPU is present
     if [ "$HAS_GPU" = "1" ]; then
         CHROME_FLAGS="$CHROME_FLAGS --enable-gpu-rasterization --ignore-gpu-blocklist --enable-accelerated-2d-canvas --enable-native-gpu-memory-buffers"
-        echo "GPU detected: Enabling hardware acceleration flags."
+        echo "GPU detected: Enabling hardware acceleration flags (GLES2)."
     fi
 
     # Conditional logging for debugging
