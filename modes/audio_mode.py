@@ -35,7 +35,7 @@ if DEVICE_INDEX_ENV and DEVICE_INDEX_ENV != 'None' and DEVICE_INDEX_ENV != '':
     DEVICE_INDEX = int(DEVICE_INDEX_ENV)
 
 # Audio Configuration
-CHUNK = 2048
+CHUNK = 8192             # High-fidelity FFT resolution for extreme low-end precision
 FORMAT = pyaudio.paInt16
 CHANNELS = 1
 
@@ -248,13 +248,14 @@ ema_rms_a = 0.0
 ema_rms_z = 0.0
 
 # --- SPECTRUM ANALYZER CONFIGURATION ---
-NUM_BANDS = 64           # Increased for even better resolution
-MIN_FREQ = 1            # Ultra-low range requested by user
-MAX_FREQ = 24000         # Up to Nyquist for 48kHz
-MIN_DB = 15              # More sensitivity for quiet details
-MAX_DB = 95              # More headroom to prevent saturation
-SMOOTHING_FACTOR = 0.85  # Slightly smoother
-PEAK_DECAY = 0.96
+NUM_BANDS = 120          # Ultra-high density for 1080p professional display
+MIN_FREQ = 1
+MAX_FREQ = 24000
+MIN_DB = 30
+MAX_DB = 95
+SMOOTHING_FACTOR = 0.78  # Fast, reactive response
+PEAK_GRAVITY = 0.015     # Physical-like peak fall
+PEAK_MAX_SPEED = 0.05
 
 # Professional Slope Setting: 0dB (Raw), 3dB (Pink Noise), 4.5dB (Modern Standard)
 # A slope of 4.5dB/octave is standard in pro plugins like FabFilter Pro-Q to make a 
@@ -295,13 +296,17 @@ band_indices, band_edges, band_centers = get_log_bands(SAMPLE_RATE, CHUNK, NUM_B
 bar_heights = np.zeros(NUM_BANDS)
 peak_heights = np.zeros(NUM_BANDS)
 
-# Hann window for smoother FFT and reduced leakage (Pro-grade)
-fft_window = np.hanning(CHUNK)
+# Blackman-Harris window for ultra-low spectral leakage (Mastering grade)
+fft_window = np.blackman(CHUNK)
 
 # Calculate professional visual tilt based on the requested slope
 # We use 1kHz as the zero-crossing reference point
 octaves_from_reference = np.log2(np.array(band_centers) / 1000.0)
 visual_tilt = octaves_from_reference * SLOPE_DB_PER_OCTAVE
+
+# Store last peak positions and velocities for gravity effect
+peak_pos = np.zeros(NUM_BANDS)
+peak_vel = np.zeros(NUM_BANDS)
 
 
 def signal_handler(sig, frame):
@@ -410,48 +415,61 @@ while running:
             # Apply visual smoothing (fast rise, slow decay)
             for i in range(NUM_BANDS):
                 if current_bar_targets[i] > bar_heights[i]:
-                    bar_heights[i] = bar_heights[i] + 0.7 * (current_bar_targets[i] - bar_heights[i]) # Faster rise
+                    bar_heights[i] = bar_heights[i] + 0.8 * (current_bar_targets[i] - bar_heights[i]) # Very fast rise
                 else:
                     bar_heights[i] *= SMOOTHING_FACTOR      # Exponential decay
 
-                # Peak handling
-                if bar_heights[i] > peak_heights[i]:
-                    peak_heights[i] = bar_heights[i]
+                # Professional Unity-style peak handling (Gravity based)
+                if bar_heights[i] > peak_pos[i]:
+                    peak_pos[i] = bar_heights[i]
+                    peak_vel[i] = 0
                 else:
-                    peak_heights[i] *= PEAK_DECAY
+                    peak_vel[i] = min(PEAK_MAX_SPEED, peak_vel[i] + PEAK_GRAVITY)
+                    peak_pos[i] -= peak_vel[i]
+                    if peak_pos[i] < bar_heights[i]:
+                        peak_pos[i] = bar_heights[i]
+                        peak_vel[i] = 0
 
-            # Draw the spectrum analyzer (Full width and refined)
-            analyzer_height = screen.get_height() // 2
+            # Draw the spectrum analyzer (Full immersive depth)
+            analyzer_height = screen.get_height() // 2 + 100
             analyzer_y_bottom = screen.get_height() - 150
-            bar_spacing = 4
-            total_bars_width = screen.get_width() - 80 # Use 95%+ of screen width
+            bar_spacing = 2
+            total_bars_width = screen.get_width() - 40 
             bar_width = (total_bars_width // NUM_BANDS) - bar_spacing
             start_x = (screen.get_width() - (NUM_BANDS * (bar_width + bar_spacing))) // 2
 
             for i in range(NUM_BANDS):
                 h = int(bar_heights[i] * analyzer_height)
-                ph = int(peak_heights[i] * analyzer_height)
+                ph = int(peak_pos[i] * analyzer_height)
                 
                 x = start_x + i * (bar_width + bar_spacing)
                 
-                # Premium Color Palette: Gradient from Slate to Cyan/Mint
-                # Bass (left) is more blue/slate, Treble (right) is more mint/white
-                r = int(100 + 100 * (i / NUM_BANDS))
-                g = int(180 + 75 * (i / NUM_BANDS))
-                b = int(220 - 50 * (i / NUM_BANDS))
+                # Base colors for the gradient
+                # Slate -> Teal -> Mint
+                r_start, g_start, b_start = 50, 80, 150
+                r_end, g_end, b_end = 150, 255, 200
                 
-                # Adjust brightness by intensity
-                intensity = 0.6 + 0.4 * bar_heights[i]
-                bar_color = (int(r * intensity), int(g * intensity), int(b * intensity))
+                # Dynamic color intensity based on bar height
+                mix = bar_heights[i]
+                r = int(r_start + (r_end - r_start) * mix)
+                g = int(g_start + (g_end - g_start) * mix)
+                b = int(b_start + (b_end - b_start) * mix)
                 
-                # Draw bar with rounded corners
-                if h > 4:
-                    pygame.draw.rect(screen, bar_color, (x, analyzer_y_bottom - h, bar_width, h), border_radius=4)
+                if h > 2:
+                    # Draw a subtle vertical gradient (stacked rects)
+                    num_segments = 5
+                    for s in range(num_segments):
+                        seg_h = h // num_segments
+                        seg_y = analyzer_y_bottom - (s + 1) * seg_h
+                        brightness = 0.5 + 0.5 * (s / num_segments)
+                        seg_color = (int(r * brightness), int(g * brightness), int(b * brightness))
+                        pygame.draw.rect(screen, seg_color, (x, seg_y, bar_width, seg_h))
                 
                 # Draw peak indicator (floating)
                 if ph > 5:
-                    peak_color = (255, 255, 255) # Pure white peak for clarity
-                    pygame.draw.rect(screen, peak_color, (x, analyzer_y_bottom - ph - 2, bar_width, 2), border_radius=1)
+                    peak_alpha = int(255 * peak_pos[i])
+                    peak_color = (255, 255, 255)
+                    pygame.draw.rect(screen, peak_color, (x, analyzer_y_bottom - ph - 2, bar_width, 2))
 
             # Draw labels for key frequencies
             key_freqs = [60, 250, 1000, 4000, 16000]
