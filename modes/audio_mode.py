@@ -63,7 +63,9 @@ def ignore_stderr():
 
 print("Initializing Audio Mode...")
 with ignore_stderr():
-    pygame.init()
+    # Selective init: skip mixer/joystick/cdrom probing (~300-500ms saved on Pi Zero 2)
+    pygame.display.init()
+    pygame.font.init()
 
 # Display initialization (1080p full screen, intended for a 14" LCD)
 if not os.environ.get("DISPLAY") and not os.environ.get("WAYLAND_DISPLAY"):
@@ -245,10 +247,15 @@ try:
         return w
 
     a_gains = get_a_weighting_gains(SAMPLE_RATE, FFT_SIZE)
-    # fft_norm will be calculated after fft_window is defined
+
+    # Fast dBA path: pre-compute A-weighting for the small chunk size
+    # This gives 32ms response instead of 170ms from the big FFT window
+    chunk_a_gains = get_a_weighting_gains(SAMPLE_RATE, CHUNK_READ)
+    chunk_window = np.hanning(CHUNK_READ).astype(np.float32)
+    chunk_norm = 1.0 / (CHUNK_READ * np.sqrt(max(1e-12, np.mean(chunk_window**2))))
 
     dt = CHUNK_READ / SAMPLE_RATE
-    fast_alpha = 1.0 - np.exp(-dt / 0.125)  # 125ms FAST integration time
+    fast_alpha = 1.0 - np.exp(-dt / 0.08)  # Faster 80ms release time
 
     stream = p.open(**stream_params)
     # Initialize rolling audio buffer for sliding window FFT
@@ -260,6 +267,9 @@ except Exception as e:
     )
     # Ensure bridge variables and gains are defined even in failure state
     a_gains = np.ones(FFT_SIZE // 2 + 1)  # Flat gains as fallback
+    chunk_a_gains = np.ones(CHUNK_READ // 2 + 1)
+    chunk_window = np.hanning(CHUNK_READ).astype(np.float32)
+    chunk_norm = 1.0 / (CHUNK_READ * np.sqrt(max(1e-12, np.mean(chunk_window**2))))
     audio_buffer = np.zeros(FFT_SIZE, dtype=np.float32)
     stream = None
 
@@ -267,9 +277,7 @@ running = True
 clock = pygame.time.Clock()
 
 font_extra_large = pygame.font.Font(None, 220)
-font_large = pygame.font.Font(None, 160)
 font_medium = pygame.font.Font(None, 80)
-font_small = pygame.font.Font(None, 40)
 font_tiny = pygame.font.Font(None, 25)
 
 last_ui_update_time = time.time()
@@ -289,7 +297,7 @@ MAX_DB = 145  # Balanced range for high-energy music
 # Smoothing adjusted for optimized (~31Hz) updates
 SMOOTHING_FACTOR = 0.85  # Natural decay for 31Hz baseline
 RISE_SMOOTHING = 0.95  # Ultra-Reactive: Sudden peaks are instant (95% delta)
-CURVE_SMOOTHING = 0.88  # Smooth curve for 'Liquid' visual feel
+CURVE_SMOOTHING = 0.75  # Responsive curve with smooth 'Liquid' feel
 PEAK_GRAVITY = 0.008  # Gravity adjusted for ~31Hz
 PEAK_MAX_SPEED = 0.08  # Max speed adjusted for ~31Hz
 NOISE_GATE_LOW = 0.12  # Stricter gate to remove baseline mic noise
@@ -534,45 +542,54 @@ while running:
             fft_complex[_vlf_mask] = 0
             fft_complex[_nyquist_mask] = 0
 
-            # 3. Z-weighted (Raw) RMS in Frequency Domain (Parseval's Theorem)
-            # This is MUCH faster on Pi Zero 2 than time-domain irfft
-            mag_sq = np.abs(fft_complex) ** 2
-            # Sum energy (compensating for rfft symmetry)
-            total_energy = mag_sq[0] + 2 * np.sum(mag_sq[1:-1]) + mag_sq[-1]
-            z_rms = np.sqrt(max(1e-12, total_energy)) * fft_norm
+            # 3. FAST dBA PATH: Small FFT on newest chunk for responsive level metering
+            # (32ms latency vs 170ms from the big FFT window)
+            chunk_fft = np.fft.rfft(new_data * chunk_window[:len(new_data)])
+            chunk_fft[0] = 0  # Remove DC
 
-            # 4. A-Weighted RMS in Frequency Domain
-            mag_sq_aw = np.abs(fft_complex * a_gains) ** 2
-            total_energy_aw = mag_sq_aw[0] + 2 * np.sum(mag_sq_aw[1:-1]) + mag_sq_aw[-1]
-            a_rms = np.sqrt(max(1e-12, total_energy_aw)) * fft_norm
+            # Z-weighted (raw) RMS from chunk
+            chunk_mag_sq = np.abs(chunk_fft) ** 2
+            chunk_energy = chunk_mag_sq[0] + 2 * np.sum(chunk_mag_sq[1:-1]) + chunk_mag_sq[-1]
+            z_rms_fast = np.sqrt(max(1e-12, chunk_energy)) * chunk_norm
 
-            # Fast Integration (EMA)
+            # A-weighted RMS from chunk
+            chunk_aw = chunk_fft * chunk_a_gains[:len(chunk_fft)]
+            chunk_mag_sq_aw = np.abs(chunk_aw) ** 2
+            chunk_energy_aw = chunk_mag_sq_aw[0] + 2 * np.sum(chunk_mag_sq_aw[1:-1]) + chunk_mag_sq_aw[-1]
+            a_rms_fast = np.sqrt(max(1e-12, chunk_energy_aw)) * chunk_norm
+
+            # Asymmetric EMA: instant attack, smooth release
             if ema_rms_z == 0:
-                ema_rms_z = z_rms
-                ema_rms_a = a_rms
+                ema_rms_z = z_rms_fast
+                ema_rms_a = a_rms_fast
             else:
-                ema_rms_z = ema_rms_z + fast_alpha * (z_rms - ema_rms_z)
-                ema_rms_a = ema_rms_a + fast_alpha * (a_rms - ema_rms_a)
+                if z_rms_fast > ema_rms_z:
+                    ema_rms_z = z_rms_fast  # Instant attack
+                else:
+                    ema_rms_z += fast_alpha * (z_rms_fast - ema_rms_z)
+                if a_rms_fast > ema_rms_a:
+                    ema_rms_a = a_rms_fast  # Instant attack
+                else:
+                    ema_rms_a += fast_alpha * (a_rms_fast - ema_rms_a)
 
             # Log calculation
             db_z = (20 * np.log10(max(1e-9, ema_rms_z))) + CALIBRATION_OFFSET
             db_a = (20 * np.log10(max(1e-9, ema_rms_a))) + CALIBRATION_OFFSET
 
-            # 5. NOISE FLOOR COMPENSATION
-            # Aggressive fix for the "34 vs 40" discrepancy in silence.
-            # We fade in an 8dB correction for anything below 45dB.
+            # NOISE FLOOR COMPENSATION
+            # Fade in an 8dB correction for anything below 45dB.
             if db_a < 45:
                 correction = 8.0 * (1.0 - (max(30, db_a) - 30) / 15)
                 db_a -= correction
                 db_z -= correction
 
-            # Keep track of the display value (Peak hold)
+            # Peak hold display (250ms hold for responsive feel)
             current_time = time.time()
             if db_a > last_displayed_dba:
                 last_displayed_dba = db_a
                 last_displayed_dbz = db_z
                 last_ui_update_time = current_time
-            elif current_time - last_ui_update_time >= 0.5:
+            elif current_time - last_ui_update_time >= 0.25:
                 last_displayed_dba = db_a
                 last_displayed_dbz = db_z
                 last_ui_update_time = current_time
