@@ -252,12 +252,13 @@ ema_rms_a = 0.0
 ema_rms_z = 0.0
 
 # --- SPECTRUM ANALYZER CONFIGURATION ---
-NUM_BANDS = 96
+NUM_BANDS = 120  # Increased for higher visual density (Mastering Grade)
 MIN_FREQ = 25
 MAX_FREQ = 24000
 MIN_DB = 62
 MAX_DB = 140  # Balanced range for high-energy music
-SMOOTHING_FACTOR = 0.72
+SMOOTHING_FACTOR = 0.72  # Fast rise, natural decay
+CURVE_SMOOTHING = 0.85   # Additional smoothing for the visual curve
 PEAK_GRAVITY = 0.04
 PEAK_MAX_SPEED = 0.15
 NOISE_GATE_LOW = 0.12  # Stricter gate to remove baseline mic noise
@@ -335,6 +336,10 @@ visual_tilt = octaves_from_reference * SLOPE_DB_PER_OCTAVE
 # Store last peak positions and velocities for gravity effect
 peak_pos = np.zeros(NUM_BANDS)
 peak_vel = np.zeros(NUM_BANDS)
+curve_heights = np.zeros(NUM_BANDS)  # Smooth curve buffer
+
+# Pre-allocate alpha-blending surfaces for performance (Pi Zero 2 WH optimization)
+overlay_surface = pygame.Surface(screen.get_size(), pygame.SRCALPHA)
 
 
 def signal_handler(sig, frame):
@@ -544,69 +549,97 @@ while running:
                         peak_pos[i] = bar_heights[i]
                         peak_vel[i] = 0
 
-            # Draw the spectrum analyzer (Centered and ultra-wide)
+            # --- CURVE CALCULATION ---
+            # We calculate a second, even smoother buffer for the "Professional Curve"
+            curve_points = []
+            curve_fill_points = []
+            
+            # Start and end points for the fill (at the bottom)
             analyzer_height = screen.get_height() // 2 + 80
             analyzer_y_bottom = screen.get_height() - 150
-            bar_spacing = 5
+            bar_spacing = 3 # Tighter spacing for higher density
             total_bars_width = screen.get_width() - 100
             bar_width = (total_bars_width // NUM_BANDS) - bar_spacing
-            start_x = (
-                screen.get_width() - (NUM_BANDS * (bar_width + bar_spacing))
-            ) // 2
+            start_x = (screen.get_width() - (NUM_BANDS * (bar_width + bar_spacing))) // 2
 
+            for i in range(NUM_BANDS):
+                # Apply extra smoothing for the curve line
+                curve_heights[i] = curve_heights[i] * CURVE_SMOOTHING + bar_heights[i] * (1 - CURVE_SMOOTHING)
+                
+                h = curve_heights[i] * analyzer_height
+                x = start_x + i * (bar_width + bar_spacing) + (bar_width // 2)
+                y = analyzer_y_bottom - h
+                curve_points.append((x, y))
+                
+                # For the fill, we go from left to right then back along the bottom
+                curve_fill_points.append((x, y))
+
+            # Add bottom corners for the fill polygon
+            if curve_fill_points:
+                curve_fill_points.append((curve_fill_points[-1][0], analyzer_y_bottom))
+                curve_fill_points.append((curve_fill_points[0][0], analyzer_y_bottom))
+
+            # --- DRAWING PASS ---
+            
+            # Use pre-allocated surface to minimize overhead
+            overlay_surface.fill((0, 0, 0, 0)) # Clear for new frame
+            
+            # 1. Draw the "Aura" / Fill under the curve (Premium Glow Effect)
+            if len(curve_fill_points) > 3:
+                # Pure blueish-green tint for the area
+                pygame.draw.polygon(overlay_surface, (50, 150, 200, 35), curve_fill_points)
+
+            # 2. Draw the actual bars (Subtle version)
             for i in range(NUM_BANDS):
                 h = int(bar_heights[i] * analyzer_height)
                 ph = int(peak_pos[i] * analyzer_height)
-
                 x = start_x + i * (bar_width + bar_spacing)
                 f_center = band_centers[i]
 
-                # Check if this is the peak highlight
-                if i == max_energy_idx:
+                # Professional Gradient Color Logic (Synchronized with Legend)
+                w = [
+                    (25, 80, 120, 220), (250, 100, 150, 255), (500, 120, 220, 120),
+                    (2000, 140, 240, 140), (4000, 160, 255, 160), (6000, 240, 200, 120),
+                    (24000, 240, 150, 80)
+                ]
+                c = w[-1][1:]
+                for j in range(len(w)-1):
+                    if w[j][0] <= f_center < w[j+1][0]:
+                        m = (np.log10(f_center) - np.log10(w[j][0])) / (np.log10(w[j+1][0]) - np.log10(w[j][0]))
+                        c = (int(w[j][1] + (w[j+1][1]-w[j][1])*m),
+                             int(w[j][2] + (w[j+1][2]-w[j][2])*m),
+                             int(w[j][3] + (w[j+1][3]-w[j][3])*m))
+                        break
+                
+                # Bar brightness based on height
+                it = 0.6 + 0.4 * bar_heights[i]
+                final_color = (int(c[0] * it), int(c[1] * it), int(c[2] * it))
+                
+                # Check for peak highlight (Dynamic Glow)
+                is_peak = (i == max_energy_idx)
+                if is_peak:
                     final_color = (255, 255, 255)
+                    bar_alpha = 230
+                    # Draw a subtle "glow" behind the peak
+                    glow_rect = (x - 4, analyzer_y_bottom - h - 10, bar_width + 8, h + 10)
+                    pygame.draw.rect(overlay_surface, (255, 255, 255, 40), glow_rect, border_radius=8)
                 else:
-                    # Multi-Stage Waypoints [Freq, R, G, B]
-                    w = [
-                        (25, 80, 120, 220),
-                        (250, 100, 150, 255),
-                        (500, 120, 220, 120),
-                        (2000, 140, 240, 140),
-                        (4000, 160, 255, 160),
-                        (6000, 240, 200, 120),
-                        (24000, 240, 150, 80),
-                    ]
-                    c = w[-1][1:]
-                    for j in range(len(w) - 1):
-                        if w[j][0] <= f_center < w[j + 1][0]:
-                            m = (np.log10(f_center) - np.log10(w[j][0])) / (
-                                np.log10(w[j + 1][0]) - np.log10(w[j][0])
-                            )
-                            c = (
-                                int(w[j][1] + (w[j + 1][1] - w[j][1]) * m),
-                                int(w[j][2] + (w[j + 1][2] - w[j][2]) * m),
-                                int(w[j][3] + (w[j + 1][3] - w[j][3]) * m),
-                            )
-                            break
-                    it = 0.7 + 0.3 * bar_heights[i]
-                    final_color = (int(c[0] * it), int(c[1] * it), int(c[2] * it))
+                    bar_alpha = 140 # Semi-transparent bars
 
-                if h > 5:
-                    pygame.draw.rect(
-                        screen,
-                        final_color,
-                        (x, analyzer_y_bottom - h, bar_width, h),
-                        border_radius=6,
-                    )
+                if h > 4:
+                    pygame.draw.rect(overlay_surface, (*final_color, bar_alpha), (x, analyzer_y_bottom - h, bar_width, h), border_radius=4)
 
-                # Draw sharp peak indicator
+                # 3. Draw sharp peak indicators (Unity/Pro style)
                 if ph > 5:
-                    peak_color = (255, 255, 255)
-                    pygame.draw.rect(
-                        screen,
-                        peak_color,
-                        (x, analyzer_y_bottom - ph - 3, bar_width, 2),
-                        border_radius=1,
-                    )
+                    pygame.draw.rect(screen, (255, 255, 255), (x, analyzer_y_bottom - ph - 3, bar_width, 2), border_radius=1)
+
+            # Blit the accumulated alpha layer (Bars and Aura)
+            screen.blit(overlay_surface, (0, 0))
+
+            # 4. Draw the "High-Fidelity Curve" Line (AA) on top of everything
+            if len(curve_points) > 2:
+                # Main curve line (Vibrant cyan/white)
+                pygame.draw.aalines(screen, (200, 255, 255), False, curve_points, 2)
 
             # Draw labels for key frequencies
             key_freqs = [60, 250, 1000, 4000, 16000]
