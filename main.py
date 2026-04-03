@@ -750,7 +750,7 @@ if __name__ == '__main__':
     # 2. Connect to MQTT with automatic retry
     try:
         if MQTT_BROKER != "[MQTT_SERVER_IP_ADDRESS]":
-            # Set shorter keepalive and infinite reconnection delay (managed by loop_forever)
+            # Set shorter keepalive and infinite reconnection delay
             mqtt_client.connect(MQTT_BROKER, MQTT_PORT, 60)
         else:
             logging.warning("MQTT broker IP not configured. Starting in OFFLINE mode.")
@@ -763,13 +763,38 @@ if __name__ == '__main__':
 
     try:
         if MQTT_BROKER != "[MQTT_SERVER_IP_ADDRESS]":
-            # loop_forever handles automatic reconnections and persists the process
-            mqtt_client.loop_forever()
-        else:
-            # Keeps the main thread alive in offline mode
-            while True:
-                time.sleep(1)
+            # Use loop_start (non-blocking thread) to allow the main thread to monitor processes
+            mqtt_client.loop_start()
+            logging.debug("MQTT background thread started.")
+        
+        # --- GLOBAL FAIL-SAFE LOOP ---
+        # This keeps the main thread alive and monitors the active mode process (heartbeat/watchdog)
+        while True:
+            # 1. Check if the current mode process has crashed unexpectedly
+            if current_mode != 'off' and current_process:
+                poll_res = current_process.poll()
+                if poll_res is not None:
+                    logging.error(f"FAIL-SAFE: Mode process '{current_mode}' exited unexpectedly with code {poll_res}.")
+                    logging.info("Forcing display power OFF to prevent showing broken state.")
+                    # Force display off and set mode to 'off' to prevent repeated attempts
+                    set_display_power(False)
+                    current_mode = 'off'
+                    if mqtt_client and mqtt_client.is_connected():
+                        mqtt_client.publish(MQTT_STATE_TOPIC, current_mode, retain=True)
+            
+            time.sleep(1)
+            
     except KeyboardInterrupt:
-        pass
+        logging.info("KeyboardInterrupt: Shutting down...")
+    except Exception as e:
+        logging.critical(f"FATAL SOFTWARE ERROR: Orchestrator main loop crashed: {e}")
+        # This is the 'software bug' scenario mentioned by the user
     finally:
+        logging.info("--- TRIGGERING GLOBAL FAIL-SAFE EXIT ---")
+        # Ensure we always attempt to kill any child processes and turn off the screen on exit
         stop_current_mode()
+        set_display_power(False)
+        if mqtt_client:
+            mqtt_client.loop_stop()
+            logging.info("MQTT loop stopped.")
+        logging.info("--- SmartFrame Orchestrator terminated ---")
