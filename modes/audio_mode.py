@@ -248,13 +248,18 @@ ema_rms_a = 0.0
 ema_rms_z = 0.0
 
 # --- SPECTRUM ANALYZER CONFIGURATION ---
-NUM_BANDS = 56           # Increased for wider range
-MIN_FREQ = 1            # Ultra-low range requested by user
-MAX_FREQ = 24000         # Up to Nyquist for 48kHz
+NUM_BANDS = 56
+MIN_FREQ = 1
+MAX_FREQ = 24000
 MIN_DB = 20
-MAX_DB = 82              # Slightly more sensitive
-SMOOTHING_FACTOR = 0.82  # Decay rate for bars
-PEAK_DECAY = 0.95        # Decay rate for peak indicators
+MAX_DB = 82
+SMOOTHING_FACTOR = 0.82
+PEAK_DECAY = 0.95
+
+# Professional Slope Setting: 0dB (Raw), 3dB (Pink Noise), 4.5dB (Modern Standard)
+# A slope of 4.5dB/octave is standard in pro plugins like FabFilter Pro-Q to make a 
+# balanced mix look "flat" visually.
+SLOPE_DB_PER_OCTAVE = 4.5 
 
 # Frequency Range Definitions for visual labels
 FREQ_RANGES = [
@@ -277,17 +282,25 @@ def get_log_bands(sample_rate, fft_size, num_bands, min_f, max_f):
     safe_min_f = max(1.0, min_f)
     band_edges = np.logspace(np.log10(safe_min_f), np.log10(max_f), num_bands + 1)
     bands = []
+    # Pre-calculate central frequencies for each band for slope calculation
+    band_centers = []
     for i in range(num_bands):
         indices = np.where((freqs >= band_edges[i]) & (freqs < band_edges[i+1]))[0]
         bands.append(indices)
-    return bands, band_edges
+        band_centers.append(np.sqrt(band_edges[i] * band_edges[i+1])) # Geometric mean
+    return bands, band_edges, band_centers
 
-band_indices, band_edges = get_log_bands(SAMPLE_RATE, CHUNK, NUM_BANDS, MIN_FREQ, MAX_FREQ)
+band_indices, band_edges, band_centers = get_log_bands(SAMPLE_RATE, CHUNK, NUM_BANDS, MIN_FREQ, MAX_FREQ)
 bar_heights = np.zeros(NUM_BANDS)
 peak_heights = np.zeros(NUM_BANDS)
 
-# Visual Tilt Gain: +3dB/octave tilt for the ultra-wide range
-visual_tilt = np.linspace(0, 24, NUM_BANDS)
+# Hann window for smoother FFT and reduced leakage (Pro-grade)
+fft_window = np.hanning(CHUNK)
+
+# Calculate professional visual tilt based on the requested slope
+# We use 1kHz as the zero-crossing reference point
+octaves_from_reference = np.log2(np.array(band_centers) / 1000.0)
+visual_tilt = octaves_from_reference * SLOPE_DB_PER_OCTAVE
 
 
 def signal_handler(sig, frame):
@@ -320,9 +333,12 @@ while running:
             else:
                 data = data.astype(np.float32)
 
-            # --- AUDIO DSP BLOCK (REVERTED TO TIME-DOMAIN FOR USER PREFERENCE) ---
-            # 1. Forward FFT
-            fft_complex = np.fft.rfft(data)
+            # Apply Hann window to raw data before FFT (Pro standard)
+            windowed_data = data * fft_window
+
+            # --- AUDIO DSP BLOCK ---
+            # 1. Forward FFT (on windowed data)
+            fft_complex = np.fft.rfft(windowed_data)
             freqs = np.fft.rfftfreq(len(data), 1.0 / SAMPLE_RATE)
             
             # 2. DC/VLF Removal (High-Pass ~100Hz)
@@ -501,8 +517,9 @@ while running:
             screen.blit(dbz_text, dbz_rect)
 
             # Render "FAST RESPONSE" indicator (Tiny status info)
+            slope_info = f"{SLOPE_DB_PER_OCTAVE}dB SL" if SLOPE_DB_PER_OCTAVE != 0 else "RAW"
             badge_text = font_tiny.render(
-                "FAST RESPONSE", True, (110, 135, 110)
+                f"FAST RESPONSE | SLOPE: {slope_info}", True, (110, 135, 110)
             )  # Compensated subtitle
             badge_rect = badge_text.get_rect()
             badge_rect.topright = (screen.get_width() - 50, dbz_rect.bottom + 10)
