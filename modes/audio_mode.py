@@ -154,33 +154,40 @@ try:
             if info.get("maxInputChannels", 0) > 0:
                 device_info = info
                 selected_index = DEVICE_INDEX
-                print(f"Using configured audio device: {device_info.get('name')} (index {selected_index})")
+                print(f"Using configured audio device ({selected_index}): '{device_info.get('name')}'")
             else:
-                print(f"Warning: Configured device {DEVICE_INDEX} ({info.get('name')}) has no input channels. Searching for alternatives...")
-        except Exception:
-            pass
+                print(f"Warning: Configured device {DEVICE_INDEX} has no input channels. Probing alternatives...")
+        except Exception as e:
+            print(f"Warning: Primary device {DEVICE_INDEX} check failed: {e}. Searching...")
 
     if not device_info:
+        print("Probing system default audio input...")
         try:
             info = p.get_default_input_device_info()
             if info.get("maxInputChannels", 0) > 0:
                 device_info = info
                 selected_index = device_info.get("index")
-                print(f"Using default audio device: {device_info.get('name')} (index {selected_index})")
-        except Exception:
-            pass
+                print(f"  - Default is '{device_info.get('name')}' (Index {selected_index}). Success.")
+            else:
+                print("  - Default input has no channels. Searching all devices...")
+        except Exception as e:
+            print(f"  - System default input not available: {e}. Searching all devices...")
 
     if not device_info:
-        print("Searching for any available capture device...")
+        print(f"Broadly scanning all {p.get_device_count()} audio devices...")
         for i in range(p.get_device_count()):
             try:
                 info = p.get_device_info_by_index(i)
-                if info.get("maxInputChannels", 0) > 0:
+                name = info.get("name", "")
+                max_in = info.get("maxInputChannels", 0)
+                print(f"  - Testing Index {i}: '{name}' ({max_in} inputs)")
+                if max_in > 0:
                     device_info = info
                     selected_index = i
-                    print(f"Found alternative capture device: {device_info.get('name')} (index {selected_index})")
+                    print(f"  - Found viable device: '{name}' | Success.")
                     break
-            except Exception:
+            except Exception as e:
+                print(f"  - Skipping {i}: {e}")
                 continue
 
     if not device_info or device_info.get("maxInputChannels", 0) == 0:
@@ -193,7 +200,7 @@ try:
     # We favor 1 (mono) but use 2 if required.
     max_chans = device_info.get("maxInputChannels", 1)
     CHANNELS = 1 if max_chans == 1 else 2
-    
+
     # Update sample rate based on device capabilities
     SAMPLE_RATE = int(device_info.get("defaultSampleRate", 48000))
 
@@ -237,7 +244,7 @@ except Exception as e:
         "Ensure the INMP441 I2S microphone is properly connected and configured (ALSA/dtoverlay)."
     )
     # Ensure bridge variables and gains are defined even in failure state
-    a_gains = np.ones(CHUNK // 2 + 1) # Flat gains as fallback
+    a_gains = np.ones(CHUNK // 2 + 1)  # Flat gains as fallback
     stream = None
 
 running = True
