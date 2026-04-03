@@ -372,6 +372,59 @@ peak_pos = np.zeros(NUM_BANDS)
 peak_vel = np.zeros(NUM_BANDS)
 curve_heights = np.zeros(NUM_BANDS)  # Smooth curve buffer
 
+# --- PRE-COMPUTED CONSTANTS (avoid per-frame recalculation on Pi Zero 2) ---
+
+# FFT frequency bins (constant for the entire session)
+fft_freqs = np.fft.rfftfreq(FFT_SIZE, 1.0 / SAMPLE_RATE)
+_vlf_mask = fft_freqs < 1        # DC/VLF removal mask
+_nyquist_mask = fft_freqs > 22500  # Nyquist cleanup mask
+
+# Per-band gradient colors (synchronized with frequency legend)
+_COLOR_WAYPOINTS = [
+    (20, 80, 120, 220),     # Sub
+    (60, 100, 140, 240),    # Low
+    (250, 120, 220, 120),   # Low-Mid
+    (500, 140, 240, 140),   # Mid
+    (2000, 160, 255, 160),  # Hi-Mid
+    (5000, 240, 200, 120),  # Highs
+    (10000, 240, 150, 80),  # Brilliance
+    (22500, 220, 100, 60),  # Extended Brilliance
+]
+band_colors = []
+for _fc in band_centers:
+    _c = _COLOR_WAYPOINTS[-1][1:]
+    for _j in range(len(_COLOR_WAYPOINTS) - 1):
+        if _COLOR_WAYPOINTS[_j][0] <= _fc < _COLOR_WAYPOINTS[_j + 1][0]:
+            _m = (np.log10(_fc) - np.log10(_COLOR_WAYPOINTS[_j][0])) / (
+                np.log10(_COLOR_WAYPOINTS[_j + 1][0]) - np.log10(_COLOR_WAYPOINTS[_j][0])
+            )
+            _c = (
+                int(_COLOR_WAYPOINTS[_j][1] + (_COLOR_WAYPOINTS[_j + 1][1] - _COLOR_WAYPOINTS[_j][1]) * _m),
+                int(_COLOR_WAYPOINTS[_j][2] + (_COLOR_WAYPOINTS[_j + 1][2] - _COLOR_WAYPOINTS[_j][2]) * _m),
+                int(_COLOR_WAYPOINTS[_j][3] + (_COLOR_WAYPOINTS[_j + 1][3] - _COLOR_WAYPOINTS[_j][3]) * _m),
+            )
+            break
+    band_colors.append(_c)
+
+# Per-band noise gate thresholds (compensates for visual tilt + HF boost)
+# Without this, the tilt/boost inflates the high-frequency noise floor above
+# the gate, causing >10kHz bands to appear elevated even in silence.
+noise_gate_thresholds = np.zeros(NUM_BANDS)
+_db_range = MAX_DB - MIN_DB
+for _i, _fc in enumerate(band_centers):
+    if _fc < 500:
+        _base = NOISE_GATE_LOW
+    elif _fc < 4000:
+        _base = NOISE_GATE_MID
+    elif _fc < 12000:
+        _base = NOISE_GATE_HIGH
+    else:
+        _base = NOISE_GATE_EXTREME
+    # Add normalized tilt + boost contribution so gate rises with the boost
+    _tilt_norm = max(0, visual_tilt[_i]) / _db_range
+    _boost_norm = (HIGH_FREQ_BOOST / _db_range) if _fc > 10000 else 0
+    noise_gate_thresholds[_i] = _base + _tilt_norm + _boost_norm
+
 # Pre-allocate alpha-blending surfaces for performance (Pi Zero 2 WH optimization)
 overlay_surface = pygame.Surface(screen.get_size(), pygame.SRCALPHA)
 
@@ -476,13 +529,10 @@ while running:
             # --- AUDIO DSP BLOCK ---
             # 1. Forward FFT (on windowed data)
             fft_complex = np.fft.rfft(windowed_data)
-            freqs = np.fft.rfftfreq(len(audio_buffer), 1.0 / SAMPLE_RATE)
 
-            # 2. DC/VLF Removal (Low-cut at 1Hz instead of 100Hz for user request)
-            fft_complex[freqs < 1] = 0
-            # Remove Nyquist noise spikes and ultra-high digital jitter (Above 22.5kHz)
-            # This solves the "white peak at 24kHz" issue reported on I2S microphones.
-            fft_complex[freqs > 22500] = 0
+            # 2. DC/VLF Removal + Nyquist cleanup (pre-computed masks)
+            fft_complex[_vlf_mask] = 0
+            fft_complex[_nyquist_mask] = 0
 
             # 3. Z-weighted (Raw) RMS in Frequency Domain (Parseval's Theorem)
             # This is MUCH faster on Pi Zero 2 than time-domain irfft
@@ -570,18 +620,8 @@ while running:
                 else:
                     bar_heights[i] *= SMOOTHING_FACTOR  # Exponential decay
 
-                # Dynamic Noise Gate logic: Frequency-dependent threshold
-                f_c = band_centers[i]
-                if f_c < 500:
-                    threshold = NOISE_GATE_LOW
-                elif f_c < 4000:
-                    threshold = NOISE_GATE_MID
-                elif f_c < 12000:
-                    threshold = NOISE_GATE_HIGH
-                else:
-                    threshold = NOISE_GATE_EXTREME
-
-                if bar_heights[i] < threshold:
+                # Dynamic Noise Gate (pre-computed, compensates for tilt + HF boost)
+                if bar_heights[i] < noise_gate_thresholds[i]:
                     bar_heights[i] = 0
 
                 # Identify dominant frequency (Peak highlight)
@@ -634,36 +674,14 @@ while running:
             # 1. Render bars and peak indicators to the alpha-enabled overlay
             # (Fill removed for a cleaner visual style)
 
-            # 2. Draw the actual bars (Subtle version)
+            # 2. Draw the actual bars
             for i in range(NUM_BANDS):
                 h = int(bar_heights[i] * analyzer_height)
                 ph = int(peak_pos[i] * analyzer_height)
                 x = start_x + i * (bar_width + bar_spacing)
-                f_center = band_centers[i]
 
-                # Professional Gradient Color Waypoints (Synchronized with Legend level 0)
-                w = [
-                    (20, 80, 120, 220),  # Sub
-                    (60, 100, 140, 240),  # Low
-                    (250, 120, 220, 120),  # Low-Mid
-                    (500, 140, 240, 140),  # Mid
-                    (2000, 160, 255, 160),  # Hi-Mid
-                    (5000, 240, 200, 120),  # Highs
-                    (10000, 240, 150, 80),  # Brilliance
-                    (22500, 220, 100, 60),  # Extended Brilliance
-                ]
-                c = w[-1][1:]
-                for j in range(len(w) - 1):
-                    if w[j][0] <= f_center < w[j + 1][0]:
-                        m = (np.log10(f_center) - np.log10(w[j][0])) / (
-                            np.log10(w[j + 1][0]) - np.log10(w[j][0])
-                        )
-                        c = (
-                            int(w[j][1] + (w[j + 1][1] - w[j][1]) * m),
-                            int(w[j][2] + (w[j + 1][2] - w[j][2]) * m),
-                            int(w[j][3] + (w[j + 1][3] - w[j][3]) * m),
-                        )
-                        break
+                # Use pre-computed band color
+                c = band_colors[i]
 
                 # Bar brightness based on height
                 it = 0.6 + 0.4 * bar_heights[i]
@@ -687,22 +705,23 @@ while running:
                 else:
                     bar_alpha = 140  # Semi-transparent bars
 
-                    if h > 4:
-                        pygame.draw.rect(
-                            overlay_surface,
-                            (*final_color, bar_alpha),
-                            (x, analyzer_y_bottom - h, bar_width, h),
-                            border_radius=4,
-                        )
+                # Draw the bar (for both peak and non-peak)
+                if h > 4:
+                    pygame.draw.rect(
+                        overlay_surface,
+                        (*final_color, bar_alpha),
+                        (x, analyzer_y_bottom - h, bar_width, h),
+                        border_radius=4,
+                    )
 
-                    # 3. Draw sharp peak indicators (Unity/Pro style)
-                    if ph > 5:
-                        pygame.draw.rect(
-                            screen,
-                            (255, 255, 255),
-                            (x, analyzer_y_bottom - ph - 3, bar_width, 2),
-                            border_radius=1,
-                        )
+                # Draw sharp peak indicators — skip for the dominant peak bar
+                if not is_peak and ph > 5:
+                    pygame.draw.rect(
+                        screen,
+                        (255, 255, 255),
+                        (x, analyzer_y_bottom - ph - 3, bar_width, 2),
+                        border_radius=1,
+                    )
 
             # Blit the accumulated alpha layer (Bars and Aura)
             screen.blit(overlay_surface, (0, 0))
@@ -714,20 +733,8 @@ while running:
                     p1 = curve_points[i]
                     p2 = curve_points[i + 1]
 
-                    # Calculate color for this segment based on frequency
-                    f_center = band_centers[i]
-                    c = w[-1][1:]
-                    for j in range(len(w) - 1):
-                        if w[j][0] <= f_center < w[j + 1][0]:
-                            m = (np.log10(f_center) - np.log10(w[j][0])) / (
-                                np.log10(w[j + 1][0]) - np.log10(w[j][0])
-                            )
-                            c = (
-                                int(w[j][1] + (w[j + 1][1] - w[j][1]) * m),
-                                int(w[j][2] + (w[j + 1][2] - w[j][2]) * m),
-                                int(w[j][3] + (w[j + 1][3] - w[j][3]) * m),
-                            )
-                            break
+                    # Use pre-computed band color
+                    c = band_colors[i]
 
                     # Draw subtle anti-aliased segment
                     pygame.draw.aaline(screen, c, p1, p2)
