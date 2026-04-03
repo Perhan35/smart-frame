@@ -34,19 +34,19 @@ To connect the INMP441 I2S microphone to your Raspberry Pi, follow the wiring ta
 
 ## Linux Prerequisites (Raspberry Pi OS)
 
-1. Enable the I2S microphone modules in `/boot/firmware/config.txt`:
+1. **Enable I2S Microphone**: Update `/boot/firmware/config.txt`:
 
-```ini
-dtparam=i2s=on
-dtoverlay=googlevoicehat-soundcard
-```
+   ```ini
+   dtparam=i2s=on
+   dtoverlay=googlevoicehat-soundcard
+   ```
 
-1. **Enable GPU Acceleration**: Ensure the KMS overlay is active to leverage the VideoCore GPU for hardware-accelerated rendering:
+2. **Enable GPU Acceleration**: Ensure the KMS overlay is active in `/boot/firmware/config.txt`:
 
-```ini
-dtoverlay=vc4-kms-v3d
-gpu_mem=128
-```
+   ```ini
+   dtoverlay=vc4-kms-v3d
+   gpu_mem=128
+   ```
 
 3. **Configure Screen**: Adapt to your needs:
 
@@ -59,11 +59,18 @@ hdmi_mode=82
 
 or force the kernel by adding into `/boot/firmware/cmdline.txt`:
 
-```ini
-video=HDMI-A-1:1920x1080M@60
-```
+   ```ini
+   video=HDMI-A-1:1920x1080M@60
+   ```
 
-*(a reboot of the Raspberry Pi is required)*.
+4. **Power Management Tools**: To ensure the screen shuts off immediately (avoiding the "No Signal" delay), install CEC and DDC utilities:
+
+   ```bash
+   sudo apt update
+   sudo apt install -y cec-utils ddcutil
+   ```
+
+*(A reboot is required after applying these changes).*
 
 ## Performance Optimization (Pi Zero 2 WH)
 

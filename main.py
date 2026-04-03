@@ -37,6 +37,8 @@ MQTT_STATE_TOPIC = mqtt_config.get('state_topic', 'smartframe/mode_state')
 MQTT_STATUS_TOPIC = mqtt_config.get('status_topic', 'smartframe/status')
 MQTT_AVAILABLE_MODES_TOPIC = mqtt_config.get('available_modes_topic', 'smartframe/modes_available')
 MQTT_DISCOVERY_PREFIX = mqtt_config.get('discovery_prefix', 'homeassistant')
+MQTT_BRIGHTNESS_COMMAND_TOPIC = mqtt_config.get('brightness_topic', 'smartframe/set_brightness')
+MQTT_BRIGHTNESS_STATE_TOPIC = mqtt_config.get('brightness_state_topic', 'smartframe/brightness_state')
 MQTT_USER = mqtt_config.get('username')
 MQTT_PASS = mqtt_config.get('password')
 
@@ -46,10 +48,35 @@ mqtt_client = None
 labwc_config_dir = None
 
 # Discovery cache to avoid repeated slow subprocess calls
+CACHE_FILE = os.path.join(os.path.dirname(__file__), '.smartframe_cache')
+CHROMIUM_PROFILE_DIR = os.path.join(os.path.dirname(__file__), '.chromium_profile')
+
 _working_methods = {
-    'session': None, # Cached 'Wayland (wlr-randr)' or 'X11 (xset)'
-    'hardware': []    # List of low-level methods (vcgencmd, fb0, etc) that work
+    'session_type': None,
+    'hdmi_output': None,
+    'labwc_path': None,
+    'hardware': [],
+    'brightness': 100
 }
+
+def _load_cache():
+    global _working_methods
+    if os.path.exists(CACHE_FILE):
+        try:
+            with open(CACHE_FILE, 'r') as f:
+                data = json.load(f)
+                if isinstance(data, dict):
+                    _working_methods.update(data)
+                logging.debug("Loaded display discovery cache.")
+        except Exception:
+            pass
+
+def _save_cache():
+    try:
+        with open(CACHE_FILE, 'w') as f:
+            json.dump(_working_methods, f)
+    except Exception:
+        pass
 
 _display_env_detected = False
 
@@ -58,8 +85,16 @@ def setup_display_env(force=False):
     global _display_env_detected
     if _display_env_detected and not force:
         return
+    
+    _load_cache()
+
+    # Ensure a persistent chromium profile exists for speed
+    if not os.path.exists(CHROMIUM_PROFILE_DIR):
+        os.makedirs(CHROMIUM_PROFILE_DIR, exist_ok=True)
+        logging.info(f"Created persistent Chromium profile at: {CHROMIUM_PROFILE_DIR}")
 
     uid = os.getuid()
+    needs_save = False
     
     def is_wayland_reachable(display_name):
         """Check if a Wayland socket is actually listening."""
@@ -80,58 +115,72 @@ def setup_display_env(force=False):
                 return True
         return False
 
-    # 1. Validate existing environment - delete if stale
+    # 1. Validate environment
     if 'WAYLAND_DISPLAY' in os.environ:
         if not is_wayland_reachable(os.environ['WAYLAND_DISPLAY']):
-            logging.debug(f"Cleaning stale WAYLAND_DISPLAY: {os.environ['WAYLAND_DISPLAY']}")
             del os.environ['WAYLAND_DISPLAY']
-            _working_methods['session'] = None
+            _working_methods['session_type'] = None
+            needs_save = True
 
     if 'DISPLAY' in os.environ:
         if not is_x11_active():
-            logging.debug(f"Cleaning stale DISPLAY: {os.environ['DISPLAY']}")
             del os.environ['DISPLAY']
-            _working_methods['session'] = None
+            _working_methods['session_type'] = None
+            needs_save = True
 
-    # 2. Force default XDG_RUNTIME_DIR if missing (critical for Wayland)
+    # 2. Force default XDG_RUNTIME_DIR if missing
     if 'XDG_RUNTIME_DIR' not in os.environ:
         os.environ['XDG_RUNTIME_DIR'] = f"/run/user/{uid}"
 
-    # 3. Auto-detection: Search for running sessions
+    # 3. Auto-detection using cached session_type hint
     if 'WAYLAND_DISPLAY' not in os.environ and 'DISPLAY' not in os.environ:
-        # Check standard Wayland sockets
-        for i in range(2):
-            name = f'wayland-{i}'
-            if is_wayland_reachable(name):
-                os.environ['WAYLAND_DISPLAY'] = name
-                logging.info(f"Auto-detected Wayland: {name}")
-                _display_env_detected = True
-                return
+        if _working_methods['session_type'] != 'X11':
+            for i in range(2):
+                name = f'wayland-{i}'
+                if is_wayland_reachable(name):
+                    os.environ['WAYLAND_DISPLAY'] = name
+                    if _working_methods['session_type'] != 'Wayland':
+                        _working_methods['session_type'] = 'Wayland'
+                        needs_save = True
+                    _display_env_detected = True
+                    if needs_save:
+                        _save_cache()
+                    return
         
-        # Check standard X11 socket
         if is_x11_active() and os.path.exists('/tmp/.X11-unix/X0'):
             os.environ['DISPLAY'] = ':0'
-            logging.info("Auto-detected X11: :0")
-            _display_env_detected = True
+            if _working_methods['session_type'] != 'X11':
+                _working_methods['session_type'] = 'X11'
+                needs_save = True
 
+    if needs_save:
+        _save_cache()
     _display_env_detected = True
 
 def _get_hdmi_output_name():
-    # Cache the output name to avoid calling wlr-randr every time
+    global _working_methods
+    # 1. Use memory cache first
     if getattr(_get_hdmi_output_name, 'cached', None):
         return _get_hdmi_output_name.cached
+    
+    # 2. Use persistent cache second
+    if _working_methods.get('hdmi_output'):
+        _get_hdmi_output_name.cached = _working_methods['hdmi_output']
+        return _working_methods['hdmi_output']
         
     try:
-        # Avoid hanging if wlr-randr isn't available or compositor isn't responding
+        # 3. Slow discovery if nothing is cached
         output = subprocess.check_output(['wlr-randr'], stderr=subprocess.DEVNULL, timeout=1.5).decode()
         for line in output.split('\n'):
             if 'HDMI' in line and (line.strip() and not line.startswith(' ')):
                 name = line.split(' ')[0]
                 _get_hdmi_output_name.cached = name
+                _working_methods['hdmi_output'] = name
+                _save_cache()
                 return name
     except Exception:
         pass
-    return "HDMI-A-1" # Raspberry Pi standard fallback
+    return "HDMI-A-1" # Fallback
 
 def set_display_power(state: bool):
     """Sets display power using discovered strategies, optimizing for speed and reliability."""
@@ -151,6 +200,12 @@ def set_display_power(state: bool):
     ]
     
     hardware_strategies = [
+        ("DDC/CI (Fast Off)", 
+         ['sudo', 'ddcutil', 'setvcp', 'D6', '0x01' if state else '0x04'], 
+         lambda: True),
+        ("HDMI-CEC", 
+         ['sh', '-c', f'echo "{"on 0" if state else "standby 0"}" | cec-client -s -d 1'], 
+         lambda: True),
         ("Legacy (vcgencmd)", 
          ['vcgencmd', 'display_power', '1' if state else '0'], 
          lambda: True),
@@ -161,51 +216,95 @@ def set_display_power(state: bool):
 
     def run_strategy(name, cmd):
         try:
-            res = subprocess.run(cmd, capture_output=True, text=True, timeout=3)
+            # Short timeout for cached methods, longer for discovery
+            timeout = 1.2 if name in _working_methods['hardware'] else 3.0
+            res = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
             return res.returncode == 0
         except Exception:
             return False
 
     success_count = 0
+    needs_save = False
     
     # 1. Execute Session Layer
-    if _working_methods['session']:
-        name, cmd_base, _ = next((s for s in session_strategies if s[0] == _working_methods['session']), (None, None, None))
-        if name and run_strategy(name, cmd_base):
+    if _working_methods.get('session_type'):
+        # Map cached session type to a specific strategy name
+        s_name = "Wayland (wlr-randr)" if _working_methods['session_type'] == 'Wayland' else "X11 (xset)"
+        name, cmd_base, condition = next((s for s in session_strategies if s[0] == s_name), (None, None, None))
+        if name and condition() and run_strategy(name, cmd_base):
             success_count += 1
-            logging.debug(f" - {name}: Success (cached)")
         else:
-            _working_methods['session'] = None # Invalidate stale cache
+            _working_methods['session_type'] = None
+            needs_save = True
 
     if not success_count:
-        # Discovery Phase for Session
         for name, cmd, condition in session_strategies:
             if condition() and run_strategy(name, cmd):
-                _working_methods['session'] = name
+                _working_methods['session_type'] = 'Wayland' if "Wayland" in name else 'X11'
                 success_count += 1
-                logging.debug(f" - {name}: Discovered and working")
+                needs_save = True
                 break
 
     # 2. Execute Hardware Layer
-    # We run hardware strategies to ensure persistent blanking/power states
     if _working_methods['hardware']:
-        for name in _working_methods['hardware']:
+        for name in list(_working_methods['hardware']):
             name_check, cmd, _ = next((s for s in hardware_strategies if s[0] == name), (None, None, None))
             if name_check and run_strategy(name_check, cmd):
                 success_count += 1
-                logging.debug(f" - {name}: Success (cached)")
+            else:
+                _working_methods['hardware'].remove(name)
+                needs_save = True
     else:
-        # Discovery Phase for Hardware
         for name, cmd, condition in hardware_strategies:
             if condition() and run_strategy(name, cmd):
                 _working_methods['hardware'].append(name)
                 success_count += 1
-                logging.debug(f" - {name}: Discovered and working")
+                needs_save = True
+                if name in ["DDC/CI (Fast Off)", "HDMI-CEC"]:
+                    break
+
+    if needs_save:
+        _save_cache()
 
     if success_count == 0:
         logging.error(f"Failed to set display power to {target}.")
     else:
         logging.info(f"Display set to {target} (Methods: {success_count})")
+        # If turned ON, restore last known brightness
+        if state:
+            set_display_brightness(_working_methods.get('brightness', 100), force=True)
+
+def set_display_brightness(value: int, force=False):
+    """Sets display brightness using ddcutil with caching."""
+    global _working_methods
+    
+    # Clip value to 0-100
+    value = max(0, min(100, int(value)))
+    
+    # Avoid redundant calls (unless forced, e.g. on Power On)
+    if not force and _working_methods.get('brightness') == value:
+        return True
+
+    logging.info(f"Setting display brightness to {value}%...")
+    
+    # Strategy: ddcutil is the standard for HDMI
+    cmd = ['sudo', 'ddcutil', 'setvcp', '10', str(value)]
+    try:
+        # Use a short timeout so we don't hang the main thread
+        res = subprocess.run(cmd, capture_output=True, timeout=2.5)
+        if res.returncode == 0:
+            _working_methods['brightness'] = value
+            _save_cache()
+            
+            if mqtt_client and mqtt_client.is_connected():
+                mqtt_client.publish(MQTT_BRIGHTNESS_STATE_TOPIC, str(value), retain=True)
+            return True
+    except Exception as e:
+        logging.debug(f"Brightness control failed: {e}")
+    
+    return False
+
+    return False
 
 def stop_current_mode():
     global current_process
@@ -318,7 +417,13 @@ def start_mode(mode):
         
         if not os.environ.get('WAYLAND_DISPLAY') and not os.environ.get('DISPLAY'):
             try:
-                subprocess.check_call(['which', 'labwc'], stdout=subprocess.DEVNULL)
+                # Use cached path or find it once
+                labwc_bin = _working_methods.get('labwc_path')
+                if not labwc_bin:
+                    labwc_bin = subprocess.check_output(['which', 'labwc']).decode().strip()
+                    _working_methods['labwc_path'] = labwc_bin
+                    _save_cache()
+
                 global labwc_config_dir
                 labwc_config_dir = _get_labwc_config()
                 
@@ -336,7 +441,7 @@ def start_mode(mode):
                 env['MIRROR_URL'] = config.get('magic_mirror', {}).get('url', 'http://localhost:8080')
                 env['SMARTFRAME_AUDIO_DEVICE'] = str(config.get('audio', {}).get('device_index', ''))
                 
-                final_cmd = ['labwc', '-s', cmd_str]
+                final_cmd = [labwc_bin, '-s', cmd_str]
                 logging.info(f"Wrapping mode '{mode}' in a managed Wayland session (labwc) with isolated XDG_CONFIG_HOME.")
                 current_process = subprocess.Popen(final_cmd, env=env, start_new_session=True, stdout=None, stderr=None)
                 
@@ -368,7 +473,7 @@ def publish_discovery_and_status(client):
     # 2. Publish list of available modes
     client.publish(MQTT_AVAILABLE_MODES_TOPIC, json.dumps(modes), retain=True)
 
-    # 3. Publish Home Assistant Discovery payload
+    # 3. Publish Home Assistant Discovery payload for Mode Selector
     discovery_topic = f"{MQTT_DISCOVERY_PREFIX}/select/smartframe/mode/config"
     discovery_payload = {
         "name": "SmartFrame Mode",
@@ -376,11 +481,7 @@ def publish_discovery_and_status(client):
         "command_topic": MQTT_COMMAND_TOPIC,
         "state_topic": MQTT_STATE_TOPIC,
         "options": modes,
-        "availability": [
-            {
-                "topic": MQTT_STATUS_TOPIC
-            }
-        ],
+        "availability": [{"topic": MQTT_STATUS_TOPIC}],
         "device": {
             "identifiers": ["smartframe_orchestrator"],
             "name": "Smart Frame",
@@ -389,20 +490,44 @@ def publish_discovery_and_status(client):
         }
     }
     client.publish(discovery_topic, json.dumps(discovery_payload), retain=True)
-    logging.info("Published Home Assistant MQTT discovery payload and online status.")
+
+    # 4. Publish Discovery for Brightness
+    brightness_discovery_topic = f"{MQTT_DISCOVERY_PREFIX}/number/smartframe/brightness/config"
+    brightness_payload = {
+        "name": "SmartFrame Brightness",
+        "unique_id": "smartframe_brightness_control",
+        "command_topic": MQTT_BRIGHTNESS_COMMAND_TOPIC,
+        "state_topic": MQTT_BRIGHTNESS_STATE_TOPIC,
+        "min": 0,
+        "max": 100,
+        "step": 5,
+        "unit_of_measurement": "%",
+        "icon": "mdi:brightness-6",
+        "availability": [{"topic": MQTT_STATUS_TOPIC}],
+        "device": {
+            "identifiers": ["smartframe_orchestrator"]
+        }
+    }
+    client.publish(brightness_discovery_topic, json.dumps(brightness_payload), retain=True)
+    
+    logging.info("Published Home Assistant MQTT discovery payloads (Mode + Brightness).")
 
 def on_connect(client, userdata, _connect_flags, reason_code, _properties):
     global current_mode
     if not reason_code.is_failure:
         logging.info("Connected to MQTT broker.")
         client.subscribe(MQTT_COMMAND_TOPIC)
-        logging.info(f"Subscribed to command topic: {MQTT_COMMAND_TOPIC}")
+        client.subscribe(MQTT_BRIGHTNESS_COMMAND_TOPIC)
+        logging.info(f"Subscribed to command topics: {MQTT_COMMAND_TOPIC}, {MQTT_BRIGHTNESS_COMMAND_TOPIC}")
         
         publish_discovery_and_status(client)
         
         # Publish current state on connect
         if current_mode:
             client.publish(MQTT_STATE_TOPIC, current_mode, retain=True)
+        
+        # Publish current brightness on connect
+        client.publish(MQTT_BRIGHTNESS_STATE_TOPIC, str(_working_methods.get('brightness', 100)), retain=True)
     else:
         logging.error(f"Failed to connect, reason code: {reason_code}")
         if reason_code in ["Not authorized", "Bad user name or password"]:
@@ -413,10 +538,17 @@ def on_message(client, userdata, msg):
     payload = msg.payload.decode('utf-8').strip().lower()
     logging.info(f"Message received on {msg.topic}: {payload}")
     available_modes = get_available_modes()
-    if payload in available_modes:
-        start_mode(payload)
-    else:
-        logging.warning(f"Invalid payload '{payload}'. Available modes: {available_modes}")
+    if msg.topic == MQTT_COMMAND_TOPIC:
+        if payload in available_modes:
+            start_mode(payload)
+        else:
+            logging.warning(f"Invalid payload '{payload}'. Available modes: {available_modes}")
+    elif msg.topic == MQTT_BRIGHTNESS_COMMAND_TOPIC:
+        try:
+            val = int(payload)
+            set_display_brightness(val)
+        except ValueError:
+            logging.warning(f"Invalid brightness payload: {payload}")
 
 def signal_handler(sig, frame):
     logging.info(f"Signal {sig} received. Shutting down orchestrator...")

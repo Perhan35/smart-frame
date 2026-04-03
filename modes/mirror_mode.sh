@@ -78,13 +78,10 @@ if [ "$BROWSER_TYPE" = "chromium" ]; then
 
 else
     # Cog specific setup 
-    export WPE_BACKEND=fdo
-    export COG_PLATFORM=fdo
-    export COG_PLATFORM_FDO_VIEW_FULLSCREEN=1
-    export GDK_BACKEND=wayland
-    export XDG_DATA_HOME="/tmp/cog-data-$USER-$RANDOM"
-    export XDG_CACHE_HOME="/tmp/cog-cache-$USER-$RANDOM"
-    mkdir -p "$XDG_DATA_HOME" "$XDG_CACHE_HOME"
+    COG_PROFILE="$DIR/../.cog_profile"
+    mkdir -p "$COG_PROFILE/data" "$COG_PROFILE/cache"
+    export XDG_DATA_HOME="$COG_PROFILE/data"
+    export XDG_CACHE_HOME="$COG_PROFILE/cache"
     
     # Check GPU for Cog
     if [ -c /dev/dri/card0 ]; then
@@ -146,8 +143,8 @@ else
     exit 1
 fi
 
-# Cleanup browser, isolated dirs, and unclutter on exit
-trap 'echo "Cleaning up..."; kill $PID 2>/dev/null; wait $PID 2>/dev/null; kill $UNCLUTTER_PID 2>/dev/null; rm -rf $LABWC_CONFIG_DIR $XDG_DATA_HOME $XDG_CACHE_HOME' EXIT
+# Cleanup browser and unclutter on exit (do NOT delete persistent profiles)
+trap 'echo "Cleaning up..."; kill $PID 2>/dev/null; wait $PID 2>/dev/null; kill $UNCLUTTER_PID 2>/dev/null' EXIT
 
 
 # Wait for Chromium to be killed by the parent Python script
