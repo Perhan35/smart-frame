@@ -57,8 +57,11 @@ if [ "$BROWSER_TYPE" = "cog" ]; then
     export XDG_DATA_HOME="$COG_PROFILE/data"
     export XDG_CACHE_HOME="$COG_PROFILE/cache"
 
-    # Wayland fullscreen kiosk
+    # Wayland fullscreen kiosk — set initial size to match display to avoid
+    # EGL buffer mismatch on first frame (default 1024x768 gets discarded)
     export COG_PLATFORM_WL_VIEW_FULLSCREEN=1
+    export COG_PLATFORM_WL_VIEW_WIDTH=1920
+    export COG_PLATFORM_WL_VIEW_HEIGHT=1080
 
     # Pi Zero 2 rendering optimisation:
     # vc4 GPU supports GLES 2.0 which WPE WebKit can use (unlike Chromium ANGLE which needs 3.0).
@@ -81,10 +84,9 @@ if [ "$BROWSER_TYPE" = "cog" ]; then
     #   --enable-page-cache=false  Disable in-memory back/forward cache to save RAM on 512MB device
     COG_FLAGS="--platform=wl --webprocess-failure=restart --bg-color=black --enable-page-cache=false"
 
-    # Conditional logging for debugging (route WebKit/WPE messages to stderr)
+    # Conditional logging for debugging (only Cog core messages: load events, errors, warnings)
     if [ "$SMARTFRAME_DEBUG" = "1" ]; then
-        export G_MESSAGES_DEBUG=all
-        export WEBKIT_DEBUG=Loading,Network,Process
+        export G_MESSAGES_DEBUG="Cog-Core"
     fi
 
     LAUNCH_WRAPPER="nice -n 0 ionice -c 2 -n 4"
