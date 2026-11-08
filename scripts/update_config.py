@@ -1,13 +1,21 @@
 #!/usr/bin/env python3
 """
 Merges new keys from config.example.yaml into config.yaml.
-Existing values in config.yaml are never overwritten.
-Keys that no longer exist in config.example.yaml are removed.
+Existing values in config.yaml are never overwritten, and keys are never deleted:
+keys that are not in config.example.yaml are only listed, so you can review them
+(they may be optional settings you added on purpose).
+
+New keys are inserted as text, copied with their comment from config.example.yaml,
+so the comments already in config.yaml are kept.
 """
 
+import re
 import sys
 from pathlib import Path
 import yaml
+
+_TOP_KEY = re.compile(r"^([A-Za-z_][\w-]*)\s*:")
+_CHILD_KEY = re.compile(r"^  ([A-Za-z_][\w-]*)\s*:")
 
 
 def deep_merge(base: dict, updates: dict) -> tuple[dict, list[str]]:
@@ -26,21 +34,73 @@ def deep_merge(base: dict, updates: dict) -> tuple[dict, list[str]]:
     return base, added
 
 
-def deep_prune(config: dict, reference: dict, prefix: str = "") -> tuple[dict, list[str]]:
-    """
-    Recursively remove keys from `config` that are absent in `reference`.
-    Returns the pruned dict and a list of removed key paths.
-    """
-    removed = []
-    for key in list(config.keys()):
+def find_unknown(config: dict, reference: dict, prefix: str = "") -> list[str]:
+    """Key paths present in `config` but absent from `reference` (nothing is removed)."""
+    unknown = []
+    for key, value in config.items():
         full_key = f"{prefix}.{key}" if prefix else key
         if key not in reference:
-            del config[key]
-            removed.append(full_key)
-        elif isinstance(config[key], dict) and isinstance(reference[key], dict):
-            _, sub_removed = deep_prune(config[key], reference[key], full_key)
-            removed.extend(sub_removed)
-    return config, removed
+            unknown.append(full_key)
+        elif isinstance(value, dict) and isinstance(reference[key], dict):
+            unknown.extend(find_unknown(value, reference[key], full_key))
+    return unknown
+
+
+def _sections(lines: list[str]) -> dict[str, tuple[int, int]]:
+    """Top-level key -> (first line, end line) in a 2-level YAML file."""
+    starts = [(m.group(1), i) for i, line in enumerate(lines) if (m := _TOP_KEY.match(line))]
+    sections = {}
+    for n, (key, start) in enumerate(starts):
+        end = starts[n + 1][1] if n + 1 < len(starts) else len(lines)
+        sections[key] = (start, end)
+    return sections
+
+
+def insert_keys_as_text(config_text: str, example_text: str, added: list[str]) -> str | None:
+    """Copy the example lines of each added key into config_text.
+
+    Returns the new text, or None if the layout is not the simple 2-level one this
+    handles (the caller then falls back to rewriting the file).
+    """
+    lines = config_text.splitlines()
+    ex_lines = example_text.splitlines()
+    ex_sections = _sections(ex_lines)
+
+    for path in added:
+        parts = path.split(".")
+        if len(parts) == 1:
+            if parts[0] not in ex_sections:
+                return None
+            start, end = ex_sections[parts[0]]
+            block = ex_lines[start:end]
+            while block and not block[-1].strip():
+                block.pop()
+            if lines and lines[-1].strip():
+                lines.append("")
+            lines.extend(block)
+        elif len(parts) == 2:
+            section, child = parts
+            if section not in ex_sections:
+                return None
+            ex_start, ex_end = ex_sections[section]
+            child_line = next(
+                (ln for ln in ex_lines[ex_start + 1:ex_end]
+                 if (m := _CHILD_KEY.match(ln)) and m.group(1) == child),
+                None,
+            )
+            sections = _sections(lines)
+            if child_line is None or section not in sections:
+                return None
+            start, end = sections[section]
+            # Insert after the section's last indented line
+            insert_at = start + 1
+            for i in range(start + 1, end):
+                if lines[i].startswith((" ", "\t")):
+                    insert_at = i + 1
+            lines.insert(insert_at, child_line)
+        else:
+            return None
+    return "\n".join(lines) + "\n"
 
 
 def main():
@@ -52,37 +112,45 @@ def main():
         print("config.example.yaml not found, skipping config update.")
         return
 
-    with open(example_path) as f:
-        example = yaml.safe_load(f) or {}
+    example_text = example_path.read_text()
+    example = yaml.safe_load(example_text) or {}
 
     if not config_path.exists():
         print("config.yaml not found — copying from config.example.yaml.")
-        config_path.write_text(example_path.read_text())
+        config_path.write_text(example_text)
+        config_path.chmod(0o600)  # Holds the MQTT password
         return
 
-    with open(config_path) as f:
-        config = yaml.safe_load(f) or {}
+    config_text = config_path.read_text()
+    config = yaml.safe_load(config_text) or {}
 
+    unknown_keys = find_unknown(config, example)
     merged, added_keys = deep_merge(config, example)
-    pruned, removed_keys = deep_prune(merged, example)
-
-    if not added_keys and not removed_keys:
-        print("config.yaml is already up to date.")
-        return
-
-    with open(config_path, "w") as f:
-        yaml.dump(pruned, f, default_flow_style=False, allow_unicode=True, sort_keys=False)
 
     if added_keys:
+        new_text = insert_keys_as_text(config_text, example_text, added_keys)
+        if new_text is None or yaml.safe_load(new_text) != merged:
+            # Unusual layout: rewrite the whole file (comments are lost), keep a backup.
+            backup = config_path.with_name("config.yaml.bak")
+            backup.write_text(config_text)
+            backup.chmod(0o600)
+            new_text = yaml.dump(merged, default_flow_style=False, allow_unicode=True,
+                                 sort_keys=False)
+            print(f"Note: config.yaml was rewritten (comments lost). Backup: {backup.name}")
+        config_path.write_text(new_text)
+
         print(f"config.yaml updated — added {len(added_keys)} new key(s):")
         for key in added_keys:
             print(f"  + {key}")
         print("Review config.yaml and fill in any placeholder values.")
+    else:
+        print("config.yaml is already up to date.")
 
-    if removed_keys:
-        print(f"config.yaml updated — removed {len(removed_keys)} obsolete key(s):")
-        for key in removed_keys:
-            print(f"  - {key}")
+    if unknown_keys:
+        print(f"config.yaml has {len(unknown_keys)} key(s) not in config.example.yaml "
+              "(kept; delete them by hand if they are obsolete):")
+        for key in unknown_keys:
+            print(f"  ? {key}")
 
 
 if __name__ == "__main__":

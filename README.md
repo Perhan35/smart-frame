@@ -120,7 +120,16 @@ The setup script creates `config.yaml` from `config.example.yaml` automatically.
 - **Audio Mode**:
   - `threshold_db_warning`: Volume (in dB) where the dB text will turn yellow/orange (default: 60).
   - `threshold_db_error`: Volume (in dB) where the dB text will turn red (default: 85).
-  - `device_index`: (Optional) Manual ALSA microphone index. If left blank, the SmartFrame will automatically discover and cache the best device (e.g. INMP441 I2S) for you.
+  - `device_index`: (Optional) Manual ALSA microphone index. If left blank, the SmartFrame will automatically discover and cache the best device (e.g. INMP441 I2S) for you. When set, it always wins over auto-discovery (`scripts/list_audio_devices.py` helps you pick it).
+  - `mic_channel`: `"left"` when the mic's L/R pin goes to GND (as in the wiring above), `"right"` when it goes to 3.3V. On a stereo I2S device only this channel is used (averaging with the silent one would lose 6 dB).
+  - `calibration_offset_db`: added to every reading. Calibrate it against a sound level meter (or a phone/smartwatch app) in a moderately loud, steady sound (60–70 dBA).
+  - `noise_floor_dba`: (Optional) the mic's own noise in dBA, removed from every reading in energy. Set it **after** calibrating, either with `scripts/measure_noise_floor.py` (stop the service first, measure in a very quiet room) or with the INMP441 datasheet value (about 33). Leave it empty for no correction.
+
+### Sound level: what the numbers mean
+
+- Home Assistant receives, every second, the **LAeq** of that second (energy average, so a short loud noise between two updates is not missed). Both modes compute it with the same code (`smartframe/dsp.py`), so the sensor does not jump when the mode changes.
+- The big number on the audio screen is more reactive (instant rise, short hold), so it can read a little above the Home Assistant value.
+- It is a relative dBA with a single-point calibration: accurate near the calibration level, indicative far from it. Readings close to or below `noise_floor_dba` are indicative only.
 
 > **Note:** The setup script will warn you if `config.yaml` still has placeholder values and skip the service installation prompt until you configure it.
 
@@ -187,6 +196,7 @@ SmartFrame is designed to stay safe on an untrusted local network.
 
   **Warning:** once an `acl_file` is set, any user not listed in it gets no access at all. List every MQTT user you use (Home Assistant, other devices), or they will stop working. If your broker is managed by a Home Assistant add-on, configure ACLs the way that add-on documents.
 
+- **MagicMirror**: the kiosk browser checks TLS certificates. Serve MagicMirror on the Pi itself, or over HTTPS with a certificate the Pi trusts. Plain HTTP across the network can be modified by anyone on it, and a self-signed certificate shows an error page.
 - **`config.yaml`** contains the MQTT password. It is set to `chmod 600` (owner only) by the setup script and at startup.
 - **No `sudo` at runtime**: the service uses group permissions only (`i2c` for `ddcutil`, `video` for the framebuffer). `scripts/setup_hardware_access.sh` (run by `setup_pi.sh`) loads `i2c-dev` at boot (`/etc/modules-load.d/smartframe.conf`) and installs a udev rule (`/etc/udev/rules.d/99-smartframe-fb.rules`). It only changes what is missing, so it is safe to run again.
 
@@ -214,6 +224,7 @@ SmartFrame natively supports **Home Assistant MQTT Auto-Discovery**. Once connec
 | **SmartFrame Contrast** | `number` | Direct hardware contrast control (0-100%). |
 | **SmartFrame Color Profile** | `select` | Switch between sRGB, Warm, Natural, and Cool. |
 | **SmartFrame Input** | `select` | Switch monitor input source (HDMI-1, HDMI-2, etc.). |
+| **SmartFrame Ambient Sound** | `sensor` | Sound level (LAeq of each second, dBA), with long-term statistics. |
 
 ### Advanced MQTT Topics
 
@@ -224,6 +235,7 @@ The orchestrator uses the following topics for integration with other systems (e
 - `smartframe/set_contrast` / `smartframe/contrast_state`
 - `smartframe/set_color_preset` / `smartframe/color_preset_state`
 - `smartframe/set_input_source` / `smartframe/input_source_state`
+- `smartframe/audio/dba` (sound level, LAeq of each second)
 - `smartframe/status` (LWT: `online`/`offline`)
 - `smartframe/modes_available` (JSON list of modes)
 

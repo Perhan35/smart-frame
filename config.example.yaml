@@ -9,7 +9,15 @@ mqtt:
   state_topic: "smartframe/mode_state"
   status_topic: "smartframe/status"
   available_modes_topic: "smartframe/modes_available"
-  dba_state_topic: "smartframe/audio/dba"
+  dba_state_topic: "smartframe/audio/dba" # LAeq: average sound level of each second
+  brightness_topic: "smartframe/set_brightness"
+  brightness_state_topic: "smartframe/brightness_state"
+  contrast_topic: "smartframe/set_contrast"
+  contrast_state_topic: "smartframe/contrast_state"
+  color_preset_topic: "smartframe/set_color_preset"
+  color_preset_state_topic: "smartframe/color_preset_state"
+  input_source_topic: "smartframe/set_input_source"
+  input_source_state_topic: "smartframe/input_source_state"
   discovery_prefix: "homeassistant"
 
 debug: false # Set to true to see all browser and subprocess output in the terminal
@@ -21,6 +29,8 @@ magic_mirror:
 audio:
   microphone: "I2S" # Configured via OS (ALSA)
   device_index: null # Change to an integer if you need to select a specific microphone index
+  mic_channel: "left" # "left" if the mic's L/R pin goes to GND (see wiring), "right" if it goes to 3.3V
   threshold_db_warning: 60 # Volume in dB to trigger yellow/orange text color
   threshold_db_error: 85 # Volume in dB to trigger red text color
   calibration_offset_db: 0 # Add or subtract the offset using a decibel meter or a phone/smartwatch app to calibrate.
+  noise_floor_dba: null # Mic self-noise in dBA, removed from quiet readings. Set it after calibrating: scripts/measure_noise_floor.py, or ~33 (INMP441 datasheet)

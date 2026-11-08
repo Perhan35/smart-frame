@@ -116,6 +116,9 @@ elif [ "$BROWSER_TYPE" = "chromium" ]; then
     # --use-mock-keychain: Avoids D-Bus/Identity/OSCrypt overhead and log spam
     # --disk-cache-dir=$CACHE_DIR: Persistent cache (NOT /tmp which is wiped on reboot)
     # --disable-field-trial-config + --disable-crash-reporter: kill all Google phoning-home
+    # Certificate checks stay ON (no --ignore-certificate-errors): a MagicMirror served
+    # with a self-signed certificate shows an error page. Serve it over plain HTTP on
+    # the Pi itself, or over HTTPS with a certificate the Pi trusts.
     CHROME_FLAGS="--single-process --no-sandbox --noerrdialogs --disable-infobars --kiosk --hide-scrollbars --no-memcheck \
 --password-store=basic --use-mock-keychain --check-for-update-interval=31536000 \
 --enable-low-end-device-mode --disable-site-isolation-trials --test-type --no-pings \
@@ -129,7 +132,6 @@ elif [ "$BROWSER_TYPE" = "chromium" ]; then
 --disable-gpu --disable-gpu-compositing \
 --num-raster-threads=2 --renderer-process-limit=1 \
 --disable-session-crashed-bubble --hide-crash-restore-bubble \
---ignore-certificate-errors --allow-running-insecure-content --remote-allow-origins=* \
 --user-data-dir=$PROFILE_DIR \
 --memory-pressure-thresholds=1,2 \
 --disable-smooth-scrolling --mute-audio --force-device-scale-factor=1 \

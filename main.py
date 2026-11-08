@@ -11,9 +11,14 @@ import signal
 import socket
 import threading
 import queue
-import numpy as np
+import math
 import pyaudio
 import ctypes
+
+from smartframe import dsp
+from smartframe.audio_input import find_input_device
+from smartframe import perf  # PERF
+perf.mark("imports_done")  # PERF
 
 # Suppress noisy ALSA errors from PyAudio hardware probing (they spam stderr with
 # "Expression 'ret' failed in pa_linux_alsa.c" during device enumeration)
@@ -111,24 +116,39 @@ command_queue = queue.Queue()
 # Held by whoever changes current_mode / current_process (worker or watchdog),
 # so a mode switch and a crash recovery can never run at the same time.
 _mode_lock = threading.Lock()
+# Held while talking to the display (DDC/CI, CEC, wlr-randr...). Re-entrant because
+# set_display_power(True) restores brightness/contrast/preset while holding it.
+_display_lock = threading.RLock()
+# Re-entrant: the SIGTERM handler (main thread) may load the cache while that same
+# thread is in the middle of saving it.
+_cache_lock = threading.RLock()
 
-# File where audio_mode.py writes its dBA value for AudioMonitor (IPC bridge).
-# Passed to audio_mode.py via SMARTFRAME_DBA_FILE so both sides use the same path.
-BRIDGE_FILE = "/tmp/smartframe_dba"
+# Crash recovery (watchdog): relaunch a crashed mode after these delays (seconds),
+# then give up and switch to "off". The counter resets once a mode runs this long.
+RESTART_DELAYS = (3, 10, 30)
+RESTART_STABLE_AFTER = 60.0
+_restart_attempts = 0
+_pending_restart = None  # (mode, monotonic time) of the next relaunch, or None
+_mode_started_at = 0.0
 
+# Levels sent by the audio mode through its private pipe: (LAeq, LAFmax) once per
+# second. The pipe only exists between main.py and that one process: no file, so
+# nothing else can write fake values, and EOF tells us the process is gone.
+_external_levels = queue.Queue(maxsize=5)
 
-def _remove_bridge_file():
-    """Delete the dBA bridge file so a stale value is never mistaken for a live one."""
-    try:
-        os.remove(BRIDGE_FILE)
-    except FileNotFoundError:
-        pass
-    except OSError as e:
-        logging.debug(f"Could not remove bridge file {BRIDGE_FILE}: {e}")
+AUDIO_CONFIG = config.get("audio") or {}
 
 # Discovery cache to avoid repeated slow subprocess calls
 CACHE_FILE = os.path.join(os.path.dirname(__file__), ".smartframe_cache")
 CHROMIUM_PROFILE_DIR = os.path.join(os.path.dirname(__file__), ".chromium_profile")
+
+COLOR_PRESETS = {
+    "sRGB": "01",
+    "Natural (6500 K)": "05",
+    "Warm (5000 K)": "04",
+    "Cool (9300 K)": "08",
+}
+DEFAULT_COLOR_PRESET = "Natural (6500 K)"
 
 _working_methods = {
     "session_type": None,
@@ -137,7 +157,7 @@ _working_methods = {
     "hardware": [],
     "brightness": 100,
     "contrast": 50,
-    "color_preset": "6500 K",
+    "color_preset": DEFAULT_COLOR_PRESET,
     "input_source": "HDMI-1",
     "audio_device": None,
 }
@@ -162,242 +182,204 @@ def get_available_modes():
 
 
 def _discover_audio_device():
-    """Finds the best audio input device once and caches it (saves 1-2s of hardware probing)."""
-    global _working_methods
+    """Index of the microphone to use: audio.device_index from config.yaml if set,
+    otherwise auto-detected once and cached (saves 1-2s of hardware probing)."""
+    configured = AUDIO_CONFIG.get("device_index")
+    if configured is not None:
+        try:
+            return int(configured)  # audio_mode / AudioMonitor report it if unusable
+        except (TypeError, ValueError):
+            logging.warning(f"Ignoring invalid audio.device_index: {configured!r}")
+
     if _working_methods.get("audio_device") is not None:
         return _working_methods["audio_device"]
 
     try:
-        import pyaudio
-
         p = pyaudio.PyAudio()
-        found_index = None
-
-        # Priority 1: Specifically look for the I2S hardware
-        device_count = p.get_device_count()
-        logging.debug(f"Probing {device_count} audio devices for I2S hardware...")
-        
-        for i in range(device_count):
-            try:
-                info = p.get_device_info_by_index(i)
-                name = info.get('name', '').lower()
-                max_in = info.get('maxInputChannels', 0)
-                logging.debug(f"Testing device {i}: '{name}' (Max Inputs: {max_in})")
-                
-                if max_in > 0:
-                    if any(x in name for x in ['i2s', 'googlevoicehat', 'mono', 'inmp']):
-                        found_index = i
-                        logging.info(f"Discovered and matched I2S hardware: {info.get('name')} at index {i}.")
-                        break
-                    else:
-                        logging.debug(f"  - Device '{name}' does not match I2S keywords. Skipping.")
-                else:
-                    logging.debug(f"  - Device '{name}' has no input channels. Skipping.")
-            except Exception as e:
-                logging.debug(f"  - Error probing device {i}: {e}")
-                continue
-                    
-        # Priority 2: Fallback to default input
-        if found_index is None:
-            logging.debug("No direct I2S match found. Attempting to use system default input...")
-            try:
-                default_info = p.get_default_input_device_info()
-                found_index = default_info.get('index')
-                logging.info(f"Falling back to system default audio input: {default_info.get('name')} (index {found_index})")
-            except Exception as e:
-                logging.debug(f"Default input acquisition failed: {e}")
-                pass
-
-        p.terminate()
+        try:
+            found_index, _ = find_input_device(p)
+        finally:
+            p.terminate()
         if found_index is not None:
             _working_methods["audio_device"] = found_index
             _save_cache()
             return found_index
-    except ImportError:
-        pass
     except Exception as e:
         logging.debug(f"Audio discovery failed: {e}")
     return None
 
 
+def _read_level_pipe(fd):
+    """Read '<LAeq> <LAFmax>' lines sent by the audio mode until it exits (EOF)."""
+    try:
+        with os.fdopen(fd, "r", encoding="ascii", errors="replace") as pipe:
+            for line in pipe:
+                try:
+                    levels = tuple(float(v) for v in line.split()[:2])
+                except ValueError:
+                    continue
+                if len(levels) != 2 or not all(math.isfinite(v) for v in levels):
+                    continue
+                try:
+                    _external_levels.put_nowait(levels)
+                except queue.Full:
+                    pass  # Nobody is reading (e.g. MQTT offline): drop it
+    except Exception as e:
+        logging.debug(f"Audio level pipe closed with an error: {e}")
+
+
 class AudioMonitor(threading.Thread):
-    """Background thread that monitors ambient dB levels and reports to MQTT."""
+    """Publishes the ambient sound level to MQTT once per second, in every mode.
+
+    Outside audio mode it reads the microphone itself. In audio mode it releases the
+    mic and forwards the values the audio mode sends through its pipe. Both sides use
+    smartframe.dsp.LevelMeter, so the sensor does not jump when the mode changes.
+    """
+
+    CHUNK = 4096  # Frames per read (~85 ms at 48 kHz): few wake-ups, cheap
 
     def __init__(self, config, mq_client):
         super().__init__(daemon=True)
-        self.config = config
         self.mqtt_client = mq_client
         self.running = True
-        self.chunk = 4096
-        self.rate = 48000
-        self.audio_config = config.get("audio", {})
-        self.dba_topic = config.get("mqtt", {}).get(
-            "dba_state_topic", "smartframe/audio/dba"
+        self.calibration_offset = AUDIO_CONFIG.get("calibration_offset_db", 0) or 0
+        self.noise_floor = AUDIO_CONFIG.get("noise_floor_dba")
+        self.channel = dsp.channel_index(AUDIO_CONFIG.get("mic_channel", "left"))
+        self._warned_silent = False
+
+    def _publish(self, levels):
+        laeq, lafmax = levels
+        if lafmax < self.calibration_offset - 100 and not self._warned_silent:
+            # A whole second of digital zeros: no real room is that quiet.
+            logging.warning(
+                "Microphone sends only zeros. If its L/R pin goes to 3.3V, set "
+                "audio.mic_channel: \"right\" in config.yaml (or check the wiring)."
+            )
+            self._warned_silent = True
+        if self.mqtt_client and self.mqtt_client.is_connected():
+            try:
+                self.mqtt_client.publish(MQTT_DBA_STATE_TOPIC, f"{laeq:.1f}")
+            except Exception as e:
+                logging.debug(f"Monitor: publish failed: {e}")
+
+    def _open(self, p):
+        """Open the mic with its own channel count and rate. Returns (stream, channels, meter)."""
+        idx = _discover_audio_device()
+        if idx is None:
+            return None, 0, None
+        channels, rate = dsp.input_format(p.get_device_info_by_index(idx))
+        stream = p.open(
+            format=pyaudio.paInt16,
+            channels=channels,
+            rate=rate,
+            input=True,
+            input_device_index=idx,
+            frames_per_buffer=self.CHUNK,
         )
-        self.calibration_offset = self.audio_config.get("calibration_offset_db", 0)
-        self.last_publish = 0
+        meter = dsp.LevelMeter(rate, self.calibration_offset, self.noise_floor)
+        logging.info(f"Monitor: microphone open (index {idx}, {channels} ch, {rate} Hz).")
+        return stream, channels, meter
 
-    def _get_a_weighting_gains(self, rate, chunk):
-        freqs = np.fft.rfftfreq(chunk, 1.0 / rate)
-        valid_freqs = np.where(freqs == 0, 1e-10, freqs)
-        f_sq = valid_freqs**2
-        const = (12194**2) * (f_sq**2)
-        den = (
-            (f_sq + 20.6**2)
-            * np.sqrt((f_sq + 107.7**2) * (f_sq + 737.9**2))
-            * (f_sq + 12194**2)
-        )
-        w = const / den
-        w *= 1.2589
-        w[0] = 0.0
-        return w
-
-    def run(self):
-        logging.info("Audio Monitor background thread started.")
-        p = pyaudio.PyAudio()
-        stream = None
-        bridge_file = BRIDGE_FILE
-        a_gains = self._get_a_weighting_gains(self.rate, self.chunk)
-        ema_a = 0.0
-        alpha = 1.0 - np.exp(-(self.chunk / self.rate) / 0.125)  # Fast integration
-
-        while self.running:
-            # 1. First, check if Audio Mode is writing the value to our IPC bridge
-            use_bridge = False
-            db_a = None
-            if os.path.exists(bridge_file):
-                try:
-                    # Check if the file is recent (less than 5 seconds old)
-                    if time.time() - os.path.getmtime(bridge_file) < 5.0:
-                        with open(bridge_file, "r") as f:
-                            val = f.read().strip()
-                            if val:
-                                db_a = float(val)
-                                use_bridge = True
-                                # If we were using the mic, close it to free resources for audio_mode
-                                if stream:
-                                    try:
-                                        stream.stop_stream()
-                                        stream.close()
-                                    except:
-                                        pass
-                                    stream = None
-                except Exception as e:
-                    logging.debug(f"Monitor: Bridge file read failed: {e}")
-
-            if not use_bridge:
-                # 2. No bridge file. Check if Audio Mode is active.
-                # If Audio Mode is starting/running, we MUST NOT hold the mic.
-                if current_mode == "audio":
-                    if stream:
-                        try:
-                            stream.stop_stream()
-                            stream.close()
-                        except:
-                            pass
-                        stream = None
-                    # Wait for Audio Mode to start and create the bridge file
-                    time.sleep(0.2)
-                    continue
-
-                # 3. Try to use the microphone directly.
-                if not stream:
-                    try:
-                        idx = _discover_audio_device()
-                        if idx is not None:
-                            stream = p.open(
-                                format=pyaudio.paInt16,
-                                channels=1,
-                                rate=self.rate,
-                                input=True,
-                                input_device_index=idx,
-                                frames_per_buffer=self.chunk,
-                            )
-                        else:
-                            time.sleep(5)
-                            continue
-                    except Exception as e:
-                        logging.debug(f"Monitor: Failed to open device (busy?): {e}")
-                        time.sleep(5)
-                        continue
-
-                try:
-                    raw_data = stream.read(self.chunk, exception_on_overflow=False)
-                    data = np.frombuffer(raw_data, dtype=np.int16).astype(np.float32)
-
-                    fft_complex = np.fft.rfft(data)
-                    fft_aw = fft_complex * a_gains
-                    data_aw = np.fft.irfft(fft_aw)
-                    rms_a = np.sqrt(np.mean(data_aw**2))
-
-                    if ema_a == 0:
-                        ema_a = rms_a
-                    else:
-                        ema_a += alpha * (rms_a - ema_a)
-
-                    db_a = (20 * np.log10(max(1e-9, ema_a))) + self.calibration_offset
-
-                    if db_a < 45:
-                        correction = 8.0 * (1.0 - (max(30, db_a) - 30) / 15)
-                        db_a -= correction
-
-                except Exception as e:
-                    logging.debug(f"Monitor Mic Loop Error: {e}")
-                    if stream:
-                        try:
-                            stream.stop_stream()
-                            stream.close()
-                        except:
-                            pass
-                        stream = None
-                    time.sleep(2)
-                    continue
-
-            # 3. Publish result to MQTT (throttled to 1s for better responsiveness)
-            now = time.time()
-            if now - self.last_publish >= 1.0 and db_a is not None:
-                if self.mqtt_client and self.mqtt_client.is_connected():
-                    try:
-                        self.mqtt_client.publish(
-                            self.dba_topic, f"{db_a:.1f}", retain=False
-                        )
-                        self.last_publish = now
-                    except Exception:
-                        pass
-
-            # Simple sleep to reduce CPU usage if we're not waiting on audio stream read
-            if use_bridge:
-                time.sleep(0.5)
-
+    @staticmethod
+    def _close(stream):
         if stream:
             try:
                 stream.stop_stream()
                 stream.close()
-            except:
-                pass
+            except Exception as e:
+                logging.debug(f"Monitor: closing the stream failed: {e}")
+
+    def run(self):
+        logging.info("Audio Monitor background thread started.")
+        p = pyaudio.PyAudio()
+        stream, channels, meter = None, 0, None
+        last_publish = time.monotonic()
+
+        while self.running:
+            # 1. Audio mode owns the mic (also while it starts or waits for a retry):
+            #    release it and forward the values it sends through its pipe.
+            if current_mode == "audio":
+                if stream:
+                    self._close(stream)
+                    stream, meter = None, None
+                try:
+                    self._publish(_external_levels.get(timeout=0.5))
+                except queue.Empty:
+                    pass
+                continue
+
+            # Values left over from an audio session are stale now.
+            while not _external_levels.empty():
+                try:
+                    _external_levels.get_nowait()
+                except queue.Empty:
+                    break
+
+            # 2. Read the microphone directly.
+            if not stream:
+                try:
+                    stream, channels, meter = self._open(p)
+                except Exception as e:
+                    logging.debug(f"Monitor: failed to open the microphone (busy?): {e}")
+                    stream = None
+                if not stream:
+                    time.sleep(5)
+                    continue
+                last_publish = time.monotonic()
+
+            try:
+                raw = stream.read(self.CHUNK, exception_on_overflow=False)
+                meter.process(dsp.pick_channel(raw, channels, self.channel))
+            except Exception as e:
+                logging.debug(f"Monitor: microphone read error: {e}")
+                self._close(stream)
+                stream, meter = None, None
+                time.sleep(2)
+                continue
+
+            # 3. Publish LAeq / LAFmax of the last second.
+            now = time.monotonic()
+            if now - last_publish >= 1.0:
+                levels = meter.pop_interval()
+                last_publish = now
+                if levels:
+                    self._publish(levels)
+
+        self._close(stream)
         p.terminate()
-        _remove_bridge_file()
 
 
 def _load_cache():
     global _working_methods
-    if os.path.exists(CACHE_FILE):
-        try:
-            with open(CACHE_FILE, "r") as f:
-                data = json.load(f)
-                if isinstance(data, dict):
-                    _working_methods.update(data)
-                logging.debug("Loaded display discovery cache.")
-        except Exception:
-            pass
+    if not os.path.exists(CACHE_FILE):
+        return
+    try:
+        with _cache_lock, open(CACHE_FILE, "r") as f:
+            data = json.load(f)
+        if isinstance(data, dict):
+            _working_methods.update(data)
+        if _working_methods.get("color_preset") not in COLOR_PRESETS:
+            # Older versions cached the invalid default "6500 K".
+            _working_methods["color_preset"] = DEFAULT_COLOR_PRESET
+        logging.debug("Loaded display discovery cache.")
+    except Exception as e:
+        logging.debug(f"Could not load {CACHE_FILE}: {e}")
 
 
 def _save_cache():
+    """Write the cache atomically: a crash or a second thread never leaves broken JSON."""
+    tmp = CACHE_FILE + ".tmp"
     try:
-        with open(CACHE_FILE, "w") as f:
-            json.dump(_working_methods, f)
-    except Exception:
-        pass
+        with _cache_lock:
+            snapshot = {
+                k: list(v) if isinstance(v, list) else v
+                for k, v in list(_working_methods.items())
+            }
+            with open(tmp, "w") as f:
+                json.dump(snapshot, f)
+            os.replace(tmp, CACHE_FILE)
+    except Exception as e:
+        logging.debug(f"Could not save {CACHE_FILE}: {e}")
 
 
 # Load discovery cache at startup (avoids disk reads on first mode transition)
@@ -521,6 +503,17 @@ def _get_hdmi_output_name():
 FB_BLANK_PATH = "/sys/class/graphics/fb0/blank"
 
 
+def _with_display_lock(func):
+    """Run display commands one at a time: two threads sending DDC/CI commands on the
+    same I2C bus (or editing the cached strategy list) would race."""
+    def wrapper(*args, **kwargs):
+        with _display_lock:
+            return func(*args, **kwargs)
+    wrapper.__name__ = func.__name__
+    wrapper.__doc__ = func.__doc__
+    return wrapper
+
+
 def _write_sysfs(path, value):
     """Write a value to a sysfs file. Returns True on success."""
     try:
@@ -532,6 +525,7 @@ def _write_sysfs(path, value):
         return False
 
 
+@_with_display_lock
 def set_display_power(state: bool):
     """Sets display power using discovered strategies, optimizing for speed and reliability."""
     global _working_methods
@@ -687,10 +681,11 @@ def set_display_power(state: bool):
             set_display_brightness(_working_methods.get("brightness", 100), force=True)
             set_display_contrast(_working_methods.get("contrast", 50), force=True)
             set_display_color_preset(
-                _working_methods.get("color_preset", "Natural (6500 K)")
+                _working_methods.get("color_preset", DEFAULT_COLOR_PRESET)
             )
 
 
+@_with_display_lock
 def set_display_brightness(value: int, force=False):
     """Sets display brightness using ddcutil with caching."""
     global _working_methods
@@ -707,6 +702,7 @@ def set_display_brightness(value: int, force=False):
     return False
 
 
+@_with_display_lock
 def set_display_contrast(value: int, force=False):
     """Sets display contrast using ddcutil (VCP 12)."""
     global _working_methods
@@ -723,17 +719,15 @@ def set_display_contrast(value: int, force=False):
     return False
 
 
+@_with_display_lock
 def set_display_color_preset(preset_name: str):
     """Sets display color preset (VCP 14)."""
     global _working_methods
-    presets = {
-        "sRGB": "01",
-        "Natural (6500 K)": "05",
-        "Warm (5000 K)": "04",
-        "Cool (9300 K)": "08",
-    }
-    hex_val = presets.get(preset_name)
+    hex_val = COLOR_PRESETS.get(preset_name)
     if not hex_val:
+        logging.warning(
+            f"Unknown color preset {preset_name!r}. Valid: {list(COLOR_PRESETS)}"
+        )
         return False
     logging.info(f"Setting display color preset to {preset_name} ({hex_val})...")
     if _run_vcp_command("14", "0x" + hex_val):
@@ -745,6 +739,7 @@ def set_display_color_preset(preset_name: str):
     return False
 
 
+@_with_display_lock
 def set_display_input_source(source_name: str):
     """Sets display input source (VCP 60)."""
     global _working_methods
@@ -788,9 +783,6 @@ def stop_current_mode():
             except Exception:
                 pass
         current_process = None
-        # The mode may have been SIGKILLed before it could clean up: never leave a
-        # "fresh" dBA value behind, or AudioMonitor would keep reading it.
-        _remove_bridge_file()
 
         # Kill orphaned browser processes (NOT labwc — it's reused)
         for proc_name in ["chromium", "chromium-browser", "cog"]:
@@ -969,17 +961,27 @@ def _stop_labwc():
     time.sleep(0.3)  # Brief settle for DRM/kernel resource release
 
 
-def start_mode(mode):
+def start_mode(mode, restart=False):
+    """Switch to `mode`. restart=True is the watchdog relaunching a crashed mode."""
     global current_process, current_mode, mqtt_client
+    global _restart_attempts, _pending_restart, _mode_started_at
 
     mode = mode.lower()
-    if mode == current_mode:
+    # Same mode and still running: nothing to do. (Same mode with no process means
+    # it crashed and waits for a retry: choosing it again relaunches it now.)
+    if mode == current_mode and (mode == "off" or current_process is not None):
         if mqtt_client and mqtt_client.is_connected():
             mqtt_client.publish(MQTT_STATE_TOPIC, current_mode, retain=True)
         return
 
+    if not restart:
+        # A choice made by the user (or at startup) cancels any pending crash retry.
+        _restart_attempts = 0
+        _pending_restart = None
+
     previous_mode = current_mode
     logging.info(f"Transitioning mode: {previous_mode} -> {mode}")
+    perf.begin_switch(mode)  # PERF
 
     # 1. Publish intent IMMEDIATELY so HA sees the change instantly.
     current_mode = mode
@@ -988,6 +990,7 @@ def start_mode(mode):
 
     # 2. Stop the current mode's client process (labwc compositor stays alive).
     stop_current_mode()
+    perf.mark("old_mode_stopped")  # PERF
 
     if mode == "off":
         logging.info("Ensuring display power is OFF.")
@@ -1042,6 +1045,7 @@ def start_mode(mode):
         display_thread.join(timeout=4.0)
     if labwc_thread:
         labwc_thread.join(timeout=12.0)
+    perf.mark("display_and_labwc_ready")  # PERF
 
     # 6. Prepare mode-specific environment variables.
     env = os.environ.copy()
@@ -1050,7 +1054,6 @@ def start_mode(mode):
         audio_idx if audio_idx is not None else ""
     )
     env["SMARTFRAME_DEBUG"] = "1" if DEBUG_MODE else "0"
-    env["SMARTFRAME_DBA_FILE"] = BRIDGE_FILE
     if mode == "mirror":
         env["MIRROR_URL"] = config.get("magic_mirror", {}).get(
             "url", "http://localhost:8080"
@@ -1065,11 +1068,30 @@ def start_mode(mode):
         elif _labwc_wayland_display:
             env["WAYLAND_DISPLAY"] = _labwc_wayland_display
 
-    # 7. Launch the mode process.
+    # 7. Launch the mode process. The audio mode gets the write end of a private
+    #    pipe for its sound levels (only that process: pass_fds, not inherited by
+    #    anything else). We close our copy so EOF arrives when it exits.
+    level_r = level_w = None
+    if mode == "audio":
+        level_r, level_w = os.pipe()
+        env["SMARTFRAME_LEVEL_FD"] = str(level_w)
     logging.info(f"Launching '{mode}' mode (cmd: {' '.join(base_cmd)}).")
-    current_process = subprocess.Popen(
-        base_cmd, env=env, start_new_session=True, stdout=None, stderr=None
-    )
+    try:
+        current_process = subprocess.Popen(
+            base_cmd, env=env, start_new_session=True, stdout=None, stderr=None,
+            pass_fds=(level_w,) if level_w is not None else (),
+        )
+    except Exception:
+        if level_r is not None:
+            os.close(level_r)
+        raise
+    finally:
+        if level_w is not None:
+            os.close(level_w)
+    _mode_started_at = time.monotonic()
+    perf.mark("process_launched")  # PERF
+    if level_r is not None:
+        threading.Thread(target=_read_level_pipe, args=(level_r,), daemon=True).start()
 
 
 # MQTT Callbacks
@@ -1149,12 +1171,7 @@ def publish_discovery_and_status(client):
                 "unique_id": "sf_color_preset",
                 "command_topic": MQTT_COLOR_PRESET_COMMAND_TOPIC,
                 "state_topic": MQTT_COLOR_PRESET_STATE_TOPIC,
-                "options": [
-                    "sRGB",
-                    "Natural (6500 K)",
-                    "Warm (5000 K)",
-                    "Cool (9300 K)",
-                ],
+                "options": list(COLOR_PRESETS),
                 "icon": "mdi:palette",
                 "availability": [{"topic": MQTT_STATUS_TOPIC}],
                 "device": {"identifiers": ["smartframe_orchestrator"]},
@@ -1180,6 +1197,8 @@ def publish_discovery_and_status(client):
         retain=True,
     )
 
+    # Sound level (LAeq of each second). device_class + state_class give long-term
+    # statistics in HA. (unique_id unchanged so the existing history is kept.)
     client.publish(
         f"{MQTT_DISCOVERY_PREFIX}/sensor/smartframe/dba/config",
         json.dumps(
@@ -1188,7 +1207,9 @@ def publish_discovery_and_status(client):
                 "unique_id": "sf_audio_dba",
                 "state_topic": MQTT_DBA_STATE_TOPIC,
                 "unit_of_measurement": "dBA",
-                "value_template": "{{ value }}",
+                "device_class": "sound_pressure",
+                "state_class": "measurement",
+                "suggested_display_precision": 1,
                 "icon": "mdi:ear-hearing",
                 "availability": [{"topic": MQTT_STATUS_TOPIC}],
                 "device": {"identifiers": ["smartframe_orchestrator"]},
@@ -1206,6 +1227,7 @@ def on_connect(client, userdata, _connect_flags, reason_code, _properties):
     global current_mode
     if not reason_code.is_failure:
         logging.info("Connected to MQTT broker.")
+        perf.mark("mqtt_connected")  # PERF
         client.subscribe(MQTT_COMMAND_TOPIC)
         client.subscribe(MQTT_BRIGHTNESS_COMMAND_TOPIC)
         client.subscribe(MQTT_CONTRAST_COMMAND_TOPIC)
@@ -1232,7 +1254,7 @@ def on_connect(client, userdata, _connect_flags, reason_code, _properties):
         )
         client.publish(
             MQTT_COLOR_PRESET_STATE_TOPIC,
-            _working_methods.get("color_preset", "Natural (6500 K)"),
+            _working_methods.get("color_preset", DEFAULT_COLOR_PRESET),
             retain=True,
         )
         client.publish(
@@ -1285,6 +1307,14 @@ def command_worker():
             if cmd == "mode":
                 with _mode_lock:
                     start_mode(payload)
+            elif cmd == "restart":
+                # Watchdog retry: only if nothing else happened in the meantime.
+                with _mode_lock:
+                    if current_mode == payload and current_process is None:
+                        logging.info(f"Relaunching crashed mode '{payload}'.")
+                        start_mode(payload, restart=True)
+            elif cmd == "display_off":
+                set_display_power(False)
             elif cmd == "brightness":
                 set_display_brightness(payload)
             elif cmd == "contrast":
@@ -1424,14 +1454,6 @@ if __name__ == "__main__":
 
     logging.info("--- SmartFrame Orchestrator starting ---")
 
-    # A previous run may have left a "fresh-looking" dBA bridge file behind.
-    _remove_bridge_file()
-
-    # 1. Initial State: Screen off until a mode starts
-    # We run this in a thread because ddcutil can occasionally hang if the I2C bus is locked,
-    # and we don't want to block the entire orchestrator startup.
-    threading.Thread(target=set_display_power, args=(False,), daemon=True).start()
-
     # Pre-discover audio device in background (avoids 1-2s probe on first mode switch)
     threading.Thread(target=_discover_audio_device, daemon=True).start()
 
@@ -1453,9 +1475,14 @@ if __name__ == "__main__":
         logging.error(f"Error initiating MQTT connection: {e}")
 
     # 4. Request initial state from configuration via the worker queue
-    # This prevents the initial mode from racing with MQTT retained 'set_mode' messages
+    # This prevents the initial mode from racing with MQTT retained 'set_mode' messages.
+    # The screen is only switched off when the first mode is "off": done through the
+    # same queue, so it can never land after (and undo) a mode that turns it on.
     default_mode = config.get("default_mode", "off")
-    command_queue.put(("mode", default_mode))
+    if str(default_mode).lower() == "off":
+        command_queue.put(("display_off", None))
+    else:
+        command_queue.put(("mode", default_mode))
     logging.info(f"Queued initial mode request: {default_mode}")
 
     # 5. Start background dBA monitor thread
@@ -1477,20 +1504,41 @@ if __name__ == "__main__":
                 if _mode_lock.acquire(blocking=False):
                     try:
                         proc = current_process  # Snapshot: the global can change
-                        if current_mode != "off" and proc is not None:
-                            poll_res = proc.poll()
-                            if poll_res is not None:
+                        poll_res = proc.poll() if proc is not None else None
+                        if current_mode != "off" and proc is not None and poll_res is not None:
+                            current_process = None
+                            mono = time.monotonic()
+                            if mono - _mode_started_at > RESTART_STABLE_AFTER:
+                                _restart_attempts = 0  # It had been running fine
+                            if _restart_attempts < len(RESTART_DELAYS):
+                                # Keep the mode, the screen and labwc as they are, and
+                                # relaunch after a growing delay.
+                                delay = RESTART_DELAYS[_restart_attempts]
+                                _restart_attempts += 1
                                 logging.error(
                                     f"FAIL-SAFE: Mode process '{current_mode}' exited "
-                                    f"(code {poll_res}). Resetting to 'off'."
+                                    f"(code {poll_res}). Relaunching in {delay}s "
+                                    f"(try {_restart_attempts}/{len(RESTART_DELAYS)})."
                                 )
-                                current_process = None
-                                _remove_bridge_file()
+                                _pending_restart = (current_mode, mono + delay)
+                            else:
+                                logging.error(
+                                    f"FAIL-SAFE: Mode process '{current_mode}' exited "
+                                    f"(code {poll_res}) after {len(RESTART_DELAYS)} "
+                                    "relaunches. Resetting to 'off'."
+                                )
+                                _restart_attempts = 0
+                                _pending_restart = None
                                 _stop_labwc()
                                 set_display_power(False)
                                 current_mode = "off"
                                 if mqtt_client and mqtt_client.is_connected():
                                     mqtt_client.publish(MQTT_STATE_TOPIC, current_mode, retain=True)
+
+                        if _pending_restart and time.monotonic() >= _pending_restart[1]:
+                            retry_mode = _pending_restart[0]
+                            _pending_restart = None
+                            command_queue.put(("restart", retry_mode))
                     finally:
                         _mode_lock.release()
 

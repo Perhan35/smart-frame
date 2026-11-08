@@ -6,7 +6,9 @@ __pycache__/
 .env
 venv/
 config.yaml
+config.yaml.bak
 .smartframe_cache
+.smartframe_cache.tmp
 .chromium_profile/
 .cog_profile/
 pip_tmp/
