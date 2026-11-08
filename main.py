@@ -1247,6 +1247,35 @@ def on_connect(client, userdata, _connect_flags, reason_code, _properties):
             client.disconnect()
 
 
+_last_conn_fail_log = 0.0
+
+
+def on_connect_fail(client, userdata):
+    """paho only reports TCP-level failures at DEBUG level: probe the broker and say why."""
+    global _last_conn_fail_log
+    now = time.time()
+    if now - _last_conn_fail_log < 60:  # paho retries every few seconds: don't flood the log
+        return
+    _last_conn_fail_log = now
+    try:
+        socket.getaddrinfo(MQTT_BROKER, MQTT_PORT, type=socket.SOCK_STREAM)
+    except OSError as e:
+        logging.error(f"MQTT: cannot resolve broker name '{MQTT_BROKER}': {e}")
+        return
+    try:
+        socket.create_connection((MQTT_BROKER, MQTT_PORT), timeout=5).close()
+        logging.error(
+            f"MQTT: TCP connection to {MQTT_BROKER}:{MQTT_PORT} works but the MQTT "
+            "handshake failed (TLS setting or port mismatch?)."
+        )
+    except OSError as e:
+        logging.error(f"MQTT: cannot reach {MQTT_BROKER}:{MQTT_PORT}: {e}")
+
+
+def on_disconnect(client, userdata, _flags, reason_code, _properties):
+    logging.warning(f"MQTT disconnected ({reason_code}). Will retry automatically.")
+
+
 def command_worker():
     """Background worker that executes slow hardware or process commands sequentially
     to avoid blocking the main MQTT loop thread."""
@@ -1379,6 +1408,8 @@ if __name__ == "__main__":
 
     mqtt_client.will_set(MQTT_STATUS_TOPIC, "offline", retain=True)
     mqtt_client.on_connect = on_connect
+    mqtt_client.on_connect_fail = on_connect_fail
+    mqtt_client.on_disconnect = on_disconnect
     mqtt_client.on_message = on_message
 
     # Note: the i2c-dev kernel module (needed by ddcutil) is loaded at boot through
