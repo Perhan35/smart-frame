@@ -20,7 +20,6 @@ If you cannot get a quiet enough room, use the INMP441 datasheet value instead
 """
 
 import os
-import re
 import subprocess
 import sys
 import time
@@ -31,8 +30,8 @@ import yaml
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
-from smartframe import dsp  # noqa: E402
-from smartframe.audio_input import find_input_device  # noqa: E402
+from smartframe import config_edit, dsp  # noqa: E402
+from smartframe.audio_input import find_input_device, pa_format  # noqa: E402
 
 CONFIG_PATH = ROOT / "config.yaml"
 CHUNK = 4096
@@ -48,12 +47,8 @@ def service_is_running():
 
 def write_floor(value):
     """Set audio.noise_floor_dba in config.yaml, editing only that line (keeps comments)."""
-    text = CONFIG_PATH.read_text()
-    pattern = re.compile(r"^(\s+noise_floor_dba:[ \t]*)[^#\n]*?([ \t]*#.*)?$", re.MULTILINE)
-    if not pattern.search(text):
-        return False
-    new_text = pattern.sub(lambda m: f"{m.group(1)}{value:.1f}{m.group(2) or ''}", text, count=1)
-    if (yaml.safe_load(new_text) or {}).get("audio", {}).get("noise_floor_dba") != round(value, 1):
+    new_text = config_edit.set_value(CONFIG_PATH.read_text(), "audio", "noise_floor_dba", round(value, 1))
+    if new_text is None:
         return False
     CONFIG_PATH.write_text(new_text)
     return True
@@ -71,11 +66,14 @@ def main():
 
     config = yaml.safe_load(CONFIG_PATH.read_text()) or {}
     audio = config.get("audio") or {}
-    offset = audio.get("calibration_offset_db", 0) or 0
+    settings = dsp.meter_settings(audio)
+    settings["noise_floor_dba"] = None  # Measure the raw floor, without removing the old one
+    bits = dsp.capture_bits(audio)
     channel = dsp.channel_index(audio.get("mic_channel", "left"))
-    if not offset:
-        print("Warning: audio.calibration_offset_db is 0. Calibrate first, or the floor "
-              "will not match the levels you see.")
+    if audio.get("calibration_offset_db") in (None, 0):
+        print("Warning: audio.calibration_offset_db is not calibrated yet (the theoretical "
+              f"{settings['calibration_offset_db']:g} dB is used). Calibrate first, or the "
+              "floor will not match the levels you see.")
 
     # Hide ALSA/JACK probing noise
     devnull = os.open(os.devnull, os.O_WRONLY)
@@ -94,19 +92,19 @@ def main():
             print("No microphone found.")
             return 1
         channels, rate = dsp.input_format(info)
-        stream = p.open(format=pyaudio.paInt16, channels=channels, rate=rate, input=True,
+        stream = p.open(format=pa_format(bits), channels=channels, rate=rate, input=True,
                         input_device_index=index, frames_per_buffer=CHUNK)
         print(f"Microphone: {info.get('name')} ({channels} ch, {rate} Hz)")
         print("Silence please... starting in 3 s.")
         time.sleep(3)
         stream.read(CHUNK, exception_on_overflow=False)  # Drop the start-up click
 
-        meter = dsp.LevelMeter(rate, offset)
+        meter = dsp.LevelMeter(rate, **settings)
         per_second = []
         start = last = time.monotonic()
         while time.monotonic() - start < seconds:
             meter.process(dsp.pick_channel(
-                stream.read(CHUNK, exception_on_overflow=False), channels, channel))
+                stream.read(CHUNK, exception_on_overflow=False), channels, channel, bits))
             if time.monotonic() - last >= 1.0:
                 last = time.monotonic()
                 levels = meter.pop_interval()

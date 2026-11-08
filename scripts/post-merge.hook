@@ -23,7 +23,24 @@ if [ -x "$REPO_ROOT/scripts/setup_hardware_access.sh" ]; then
     "$REPO_ROOT/scripts/setup_hardware_access.sh" || echo "[post-merge] Warning: hardware access setup failed."
 fi
 
-# 3. Restart the service so the pulled code is actually running.
+# 3. Reinstall the systemd unit if its template changed (e.g. new hardening options).
+if git diff-tree -r --name-only --no-commit-id ORIG_HEAD HEAD 2>/dev/null | grep -q "scripts/smartframe.service" \
+    && [ -f /etc/systemd/system/smartframe.service ]; then
+    echo "[post-merge] smartframe.service changed — updating the installed unit..."
+    SERVICE_USER="$(stat -c %U "$REPO_ROOT" 2>/dev/null || id -un)"
+    TMP_UNIT="$(mktemp)"
+    sed -e "s|{{WORKING_DIRECTORY}}|${REPO_ROOT}|g" -e "s|{{USER}}|${SERVICE_USER}|g" \
+        "$REPO_ROOT/scripts/smartframe.service" > "$TMP_UNIT"
+    if sudo -n install -m 644 "$TMP_UNIT" /etc/systemd/system/smartframe.service 2>/dev/null \
+        && sudo -n systemctl daemon-reload 2>/dev/null; then
+        echo "[post-merge] Unit updated."
+    else
+        echo "[post-merge] Warning: could not update the unit automatically. Run: ./scripts/install_service.sh"
+    fi
+    rm -f "$TMP_UNIT"
+fi
+
+# 4. Restart the service so the pulled code is actually running.
 #    (git runs this hook only when the pull brought changes. `sudo -n` never prompts:
 #    if a password is required, the hook prints the command instead of hanging.)
 if command -v systemctl >/dev/null 2>&1 && systemctl cat smartframe.service >/dev/null 2>&1; then
@@ -35,7 +52,7 @@ if command -v systemctl >/dev/null 2>&1 && systemctl cat smartframe.service >/de
     fi
 fi
 
-# 4. Keep this hook up to date with the version in the repository.
+# 5. Keep this hook up to date with the version in the repository.
 #    (mv is atomic: the shell running this file keeps reading the old copy)
 HOOK_SRC="$REPO_ROOT/scripts/post-merge.hook"
 HOOK_DST="$(git rev-parse --git-path hooks/post-merge)"

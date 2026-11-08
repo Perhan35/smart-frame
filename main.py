@@ -16,7 +16,9 @@ import pyaudio
 import ctypes
 
 from smartframe import dsp
-from smartframe.audio_input import find_input_device
+from smartframe import ha
+from smartframe.audio_input import device_key, find_input_device, pa_format, resolve_device
+from smartframe.commands import CommandQueue, parse_command
 from smartframe import perf  # PERF
 perf.mark("imports_done")  # PERF
 
@@ -30,8 +32,8 @@ try:
     def _alsa_noop_handler(filename, line, function, err, fmt):
         pass
     _alsa_lib.snd_lib_error_set_handler(_alsa_noop_handler)
-except Exception:
-    pass  # Not on Linux or libasound not available — no-op
+except (OSError, AttributeError):
+    pass  # Not on Linux or libasound not available: nothing to silence
 
 # Load configuration
 config_path = os.path.join(os.path.dirname(__file__), "config.yaml")
@@ -41,7 +43,7 @@ if not os.path.exists(config_path):
     )
     sys.exit(1)
 with open(config_path, "r") as file:
-    config = yaml.safe_load(file)
+    config = yaml.safe_load(file) or {}
 
 # config.yaml holds the MQTT password: keep it readable by its owner only.
 try:
@@ -62,41 +64,33 @@ if DEBUG_MODE:
 
 os.environ["PYGAME_HIDE_SUPPORT_PROMPT"] = "1"
 
-mqtt_config = config.get("mqtt", {})
+mqtt_config = config.get("mqtt") or {}
+# One ID per frame (hostname by default): used in Home Assistant IDs and in every
+# topic that contains "{device_id}", so several frames can share one broker.
+DEVICE_ID = ha.device_id(mqtt_config.get("device_id"))
+
+
+def _topic(key, default):
+    return ha.expand_topic(mqtt_config.get(key) or default, DEVICE_ID)
+
+
 MQTT_BROKER = mqtt_config.get("broker", "[MQTT_SERVER_IP_ADDRESS]")
 MQTT_PORT = mqtt_config.get("port", 1883)
-MQTT_COMMAND_TOPIC = mqtt_config.get("topic", "smartframe/set_mode")
-MQTT_STATE_TOPIC = mqtt_config.get("state_topic", "smartframe/mode_state")
-MQTT_STATUS_TOPIC = mqtt_config.get("status_topic", "smartframe/status")
-MQTT_AVAILABLE_MODES_TOPIC = mqtt_config.get(
-    "available_modes_topic", "smartframe/modes_available"
-)
+MQTT_COMMAND_TOPIC = _topic("topic", "smartframe/{device_id}/set_mode")
+MQTT_STATE_TOPIC = _topic("state_topic", "smartframe/{device_id}/mode_state")
+MQTT_STATUS_TOPIC = _topic("status_topic", "smartframe/{device_id}/status")
+MQTT_RUN_STATE_TOPIC = _topic("run_state_topic", "smartframe/{device_id}/run_state")
+MQTT_AVAILABLE_MODES_TOPIC = _topic("available_modes_topic", "smartframe/{device_id}/modes_available")
 MQTT_DISCOVERY_PREFIX = mqtt_config.get("discovery_prefix", "homeassistant")
-MQTT_BRIGHTNESS_COMMAND_TOPIC = mqtt_config.get(
-    "brightness_topic", "smartframe/set_brightness"
-)
-MQTT_BRIGHTNESS_STATE_TOPIC = mqtt_config.get(
-    "brightness_state_topic", "smartframe/brightness_state"
-)
-MQTT_CONTRAST_COMMAND_TOPIC = mqtt_config.get(
-    "contrast_topic", "smartframe/set_contrast"
-)
-MQTT_CONTRAST_STATE_TOPIC = mqtt_config.get(
-    "contrast_state_topic", "smartframe/contrast_state"
-)
-MQTT_COLOR_PRESET_COMMAND_TOPIC = mqtt_config.get(
-    "color_preset_topic", "smartframe/set_color_preset"
-)
-MQTT_COLOR_PRESET_STATE_TOPIC = mqtt_config.get(
-    "color_preset_state_topic", "smartframe/color_preset_state"
-)
-MQTT_INPUT_SOURCE_COMMAND_TOPIC = mqtt_config.get(
-    "input_source_topic", "smartframe/set_input_source"
-)
-MQTT_INPUT_SOURCE_STATE_TOPIC = mqtt_config.get(
-    "input_source_state_topic", "smartframe/input_source_state"
-)
-MQTT_DBA_STATE_TOPIC = mqtt_config.get("dba_state_topic", "smartframe/audio/dba")
+MQTT_BRIGHTNESS_COMMAND_TOPIC = _topic("brightness_topic", "smartframe/{device_id}/set_brightness")
+MQTT_BRIGHTNESS_STATE_TOPIC = _topic("brightness_state_topic", "smartframe/{device_id}/brightness_state")
+MQTT_CONTRAST_COMMAND_TOPIC = _topic("contrast_topic", "smartframe/{device_id}/set_contrast")
+MQTT_CONTRAST_STATE_TOPIC = _topic("contrast_state_topic", "smartframe/{device_id}/contrast_state")
+MQTT_COLOR_PRESET_COMMAND_TOPIC = _topic("color_preset_topic", "smartframe/{device_id}/set_color_preset")
+MQTT_COLOR_PRESET_STATE_TOPIC = _topic("color_preset_state_topic", "smartframe/{device_id}/color_preset_state")
+MQTT_INPUT_SOURCE_COMMAND_TOPIC = _topic("input_source_topic", "smartframe/{device_id}/set_input_source")
+MQTT_INPUT_SOURCE_STATE_TOPIC = _topic("input_source_state_topic", "smartframe/{device_id}/input_source_state")
+MQTT_DBA_STATE_TOPIC = _topic("dba_state_topic", "smartframe/{device_id}/audio/dba")
 MQTT_USER = mqtt_config.get("username")
 MQTT_PASS = mqtt_config.get("password")
 MQTT_TLS = bool(mqtt_config.get("tls", False))
@@ -112,7 +106,8 @@ labwc_config_dir = None
 _labwc_process = None       # Persistent labwc compositor (reused across mode switches)
 _labwc_wayland_display = None  # WAYLAND_DISPLAY name for the persistent labwc session
 audio_monitor_thread = None
-command_queue = queue.Queue()
+# Display settings (brightness...) keep only their latest value while they wait.
+command_queue = CommandQueue()
 # Held by whoever changes current_mode / current_process (worker or watchdog),
 # so a mode switch and a crash recovery can never run at the same time.
 _mode_lock = threading.Lock()
@@ -130,6 +125,21 @@ RESTART_STABLE_AFTER = 60.0
 _restart_attempts = 0
 _pending_restart = None  # (mode, monotonic time) of the next relaunch, or None
 _mode_started_at = 0.0
+
+# Mode lifecycle, shown in Home Assistant as a diagnostic sensor (run_state_topic):
+#   off -> starting -> running -> (process exits) retrying -> starting -> ...
+#   ... -> failed (after the last retry; the mode is then "off" until a new choice)
+# The mode selector still shows the user's choice right away; this tells whether it
+# actually runs. Changed only by whoever holds _mode_lock.
+RUN_OFF, RUN_STARTING, RUN_RUNNING, RUN_RETRYING, RUN_FAILED = ha.RUN_STATES
+RUNNING_AFTER = 3.0  # A mode counts as running once its process has lived this long
+_run_state = RUN_OFF
+
+# Keep labwc running in "off" (screen still switched off): the next mode starts
+# without the 6-8 s cold start, at the cost of some RAM. Off by default.
+KEEP_COMPOSITOR_WHEN_OFF = bool(config.get("keep_compositor_when_off", False))
+# Screen size given to the Mirror browser (Cog) for its first frame
+SCREEN_SIZE = str(config.get("screen_size") or "1920x1080")
 
 # Levels sent by the audio mode through its private pipe: (LAeq, LAFmax) once per
 # second. The pipe only exists between main.py and that one process: no file, so
@@ -149,6 +159,7 @@ COLOR_PRESETS = {
     "Cool (9300 K)": "08",
 }
 DEFAULT_COLOR_PRESET = "Natural (6500 K)"
+INPUT_SOURCES = {"HDMI-1": "11", "HDMI-2": "12", "DisplayPort-1": "0f", "VGA": "01"}
 
 _working_methods = {
     "session_type": None,
@@ -160,6 +171,7 @@ _working_methods = {
     "color_preset": DEFAULT_COLOR_PRESET,
     "input_source": "HDMI-1",
     "audio_device": None,
+    "audio_device_name": None,  # Checked against the index: ALSA can renumber cards
 }
 
 available_modes_cache = []
@@ -197,16 +209,48 @@ def _discover_audio_device():
     try:
         p = pyaudio.PyAudio()
         try:
-            found_index, _ = find_input_device(p)
+            found_index, info = find_input_device(p)
         finally:
             p.terminate()
         if found_index is not None:
-            _working_methods["audio_device"] = found_index
-            _save_cache()
+            _remember_audio_device(found_index, info)
             return found_index
     except Exception as e:
         logging.debug(f"Audio discovery failed: {e}")
     return None
+
+
+def _remember_audio_device(index, info):
+    """Cache the auto-detected mic: its index, and its name to check that index later."""
+    name = device_key(info.get("name")) if info else None
+    if (_working_methods.get("audio_device"), _working_methods.get("audio_device_name")) != (index, name):
+        _working_methods["audio_device"] = index
+        _working_methods["audio_device_name"] = name
+        _save_cache()
+
+
+def _resolve_audio_device(p):
+    """(index, info) of the mic to open with PyAudio instance `p`, or (None, None).
+
+    A cached index is checked against the cached device name: if ALSA renumbered the
+    cards (e.g. a USB device was plugged in), the mic is found again by name, or
+    detected again. A busy mic is not "wrong": the caller just retries later.
+    """
+    index = _discover_audio_device()
+    if index is None:
+        return None, None
+    configured = AUDIO_CONFIG.get("device_index") is not None
+    name = None if configured else _working_methods.get("audio_device_name")
+    found, info = resolve_device(p, index, name)
+    if found is None:
+        if not configured:
+            logging.warning(
+                f"Cached microphone (index {index}, {name!r}) not found any more: detecting it again."
+            )
+        found, info = find_input_device(p, index if configured else None)
+    if found is not None and not configured:
+        _remember_audio_device(found, info)
+    return found, info
 
 
 def _read_level_pipe(fd):
@@ -242,14 +286,15 @@ class AudioMonitor(threading.Thread):
         super().__init__(daemon=True)
         self.mqtt_client = mq_client
         self.running = True
-        self.calibration_offset = AUDIO_CONFIG.get("calibration_offset_db", 0) or 0
-        self.noise_floor = AUDIO_CONFIG.get("noise_floor_dba")
+        self.meter_settings = dsp.meter_settings(AUDIO_CONFIG)
+        self.bits = dsp.capture_bits(AUDIO_CONFIG)
         self.channel = dsp.channel_index(AUDIO_CONFIG.get("mic_channel", "left"))
         self._warned_silent = False
 
     def _publish(self, levels):
         laeq, lafmax = levels
-        if lafmax < self.calibration_offset - 100 and not self._warned_silent:
+        silent_db = self.meter_settings["calibration_offset_db"] - 100
+        if lafmax < silent_db and not self._warned_silent:
             # A whole second of digital zeros: no real room is that quiet.
             logging.warning(
                 "Microphone sends only zeros. If its L/R pin goes to 3.3V, set "
@@ -264,20 +309,22 @@ class AudioMonitor(threading.Thread):
 
     def _open(self, p):
         """Open the mic with its own channel count and rate. Returns (stream, channels, meter)."""
-        idx = _discover_audio_device()
+        idx, info = _resolve_audio_device(p)
         if idx is None:
             return None, 0, None
-        channels, rate = dsp.input_format(p.get_device_info_by_index(idx))
+        channels, rate = dsp.input_format(info)
         stream = p.open(
-            format=pyaudio.paInt16,
+            format=pa_format(self.bits),
             channels=channels,
             rate=rate,
             input=True,
             input_device_index=idx,
             frames_per_buffer=self.CHUNK,
         )
-        meter = dsp.LevelMeter(rate, self.calibration_offset, self.noise_floor)
-        logging.info(f"Monitor: microphone open (index {idx}, {channels} ch, {rate} Hz).")
+        meter = dsp.LevelMeter(rate, **self.meter_settings)
+        logging.info(
+            f"Monitor: microphone open (index {idx}, {channels} ch, {rate} Hz, {self.bits}-bit)."
+        )
         return stream, channels, meter
 
     @staticmethod
@@ -329,7 +376,7 @@ class AudioMonitor(threading.Thread):
 
             try:
                 raw = stream.read(self.CHUNK, exception_on_overflow=False)
-                meter.process(dsp.pick_channel(raw, channels, self.channel))
+                meter.process(dsp.pick_channel(raw, channels, self.channel, self.bits))
             except Exception as e:
                 logging.debug(f"Monitor: microphone read error: {e}")
                 self._close(stream)
@@ -495,8 +542,8 @@ def _get_hdmi_output_name():
                 _working_methods["hdmi_output"] = name
                 _save_cache()
                 return name
-    except Exception:
-        pass
+    except Exception as e:
+        logging.debug(f"wlr-randr output detection failed: {e}")
     return "HDMI-A-1"  # Fallback
 
 
@@ -743,9 +790,9 @@ def set_display_color_preset(preset_name: str):
 def set_display_input_source(source_name: str):
     """Sets display input source (VCP 60)."""
     global _working_methods
-    sources = {"HDMI-1": "11", "HDMI-2": "12", "DisplayPort-1": "0f", "VGA": "01"}
-    hex_val = sources.get(source_name)
+    hex_val = INPUT_SOURCES.get(source_name)
     if not hex_val:
+        logging.warning(f"Unknown input source {source_name!r}. Valid: {list(INPUT_SOURCES)}")
         return False
     logging.info(f"Switching input source to {source_name} ({hex_val})...")
     if _run_vcp_command("60", "0x" + hex_val):
@@ -769,30 +816,47 @@ def _run_vcp_command(vcp_code, value):
         return False
 
 
+def _kill_own(names):
+    """Fallback cleanup: kill this user's processes whose name is exactly one of
+    `names`. (pkill -f would also hit any command line that merely contains the
+    word, e.g. "cog" in "recognizer.py".) Normal cleanup kills the process group."""
+    for name in names:
+        try:
+            subprocess.run(
+                ["pkill", "-x", "-u", str(os.getuid()), name],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=2,
+            )
+        except Exception as e:
+            logging.debug(f"pkill {name} failed: {e}")
+
+
+def _kill_group(proc):
+    """SIGTERM the process group started for `proc`, then SIGKILL if it lingers."""
+    try:
+        os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+        proc.wait(timeout=2)
+    except (subprocess.TimeoutExpired, ProcessLookupError, PermissionError):
+        try:
+            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+        except ProcessLookupError:
+            pass  # Already gone
+        except Exception as e:
+            logging.debug(f"SIGKILL of process group {proc.pid} failed: {e}")
+
+
 def stop_current_mode():
     """Stop the current mode's client process. The labwc compositor is kept alive for fast switching."""
     global current_process
     if current_process:
         logging.info("Stopping current mode process...")
-        try:
-            os.killpg(os.getpgid(current_process.pid), signal.SIGTERM)
-            current_process.wait(timeout=2)
-        except (subprocess.TimeoutExpired, ProcessLookupError, PermissionError):
-            try:
-                os.killpg(os.getpgid(current_process.pid), signal.SIGKILL)
-            except Exception:
-                pass
+        # The mode runs in its own session (start_new_session=True), so killing its
+        # group also stops the browser it started.
+        _kill_group(current_process)
         current_process = None
 
-        # Kill orphaned browser processes (NOT labwc — it's reused)
-        for proc_name in ["chromium", "chromium-browser", "cog"]:
-            try:
-                subprocess.run(
-                    ["pkill", "-f", proc_name],
-                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=2
-                )
-            except Exception:
-                pass
+        # Browsers that escaped the group (NOT labwc: it is reused). "chromium-browse"
+        # is "chromium-browser" cut to the 15-character process name limit.
+        _kill_own(["chromium", "chromium-browse", "cog"])
 
         # Brief settle for the client process to release Wayland resources
         time.sleep(0.1)
@@ -916,8 +980,8 @@ def _labwc_hide_cursor():
             ["labwc-msg", "action", "HideCursor"],
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=2,
         )
-    except Exception:
-        pass
+    except Exception as e:
+        logging.debug(f"labwc-msg HideCursor failed: {e}")
 
 
 def _stop_labwc():
@@ -926,14 +990,7 @@ def _stop_labwc():
 
     if _labwc_process:
         logging.info("Stopping persistent labwc compositor.")
-        try:
-            os.killpg(os.getpgid(_labwc_process.pid), signal.SIGTERM)
-            _labwc_process.wait(timeout=2)
-        except (subprocess.TimeoutExpired, ProcessLookupError, PermissionError):
-            try:
-                os.killpg(os.getpgid(_labwc_process.pid), signal.SIGKILL)
-            except Exception:
-                pass
+        _kill_group(_labwc_process)
         _labwc_process = None
 
     _labwc_wayland_display = None
@@ -941,16 +998,12 @@ def _stop_labwc():
     if labwc_config_dir and os.path.exists(labwc_config_dir):
         try:
             shutil.rmtree(labwc_config_dir)
-        except Exception:
-            pass
+        except Exception as e:
+            logging.debug(f"Could not remove {labwc_config_dir}: {e}")
         labwc_config_dir = None
 
-    # Kill any orphaned labwc processes
-    try:
-        subprocess.run(["pkill", "-f", "labwc"],
-                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=2)
-    except Exception:
-        pass
+    # Orphaned labwc processes of this user (exact name only)
+    _kill_own(["labwc"])
 
     if "WAYLAND_DISPLAY" in os.environ:
         del os.environ["WAYLAND_DISPLAY"]
@@ -961,17 +1014,97 @@ def _stop_labwc():
     time.sleep(0.3)  # Brief settle for DRM/kernel resource release
 
 
+def _publish(topic, payload, retain=False):
+    """Publish if MQTT is connected (state updates are best effort)."""
+    client = mqtt_client
+    if client and client.is_connected():
+        try:
+            client.publish(topic, payload, retain=retain)
+        except Exception as e:
+            logging.debug(f"MQTT publish to {topic} failed: {e}")
+
+
+def _set_run_state(state):
+    """Change the run state and publish it (call with _mode_lock held)."""
+    global _run_state
+    if state != _run_state:
+        logging.info(f"Run state: {_run_state} -> {state}")
+    _run_state = state
+    _publish(MQTT_RUN_STATE_TOPIC, state, retain=True)
+
+
+def _go_off(run_state):
+    """Screen off, mode "off" (call with _mode_lock held). labwc is kept only for a
+    normal "off" with keep_compositor_when_off: after a failure it restarts fresh."""
+    global current_mode
+    stop_current_mode()
+    if run_state != RUN_OFF or not KEEP_COMPOSITOR_WHEN_OFF:
+        _stop_labwc()
+    set_display_power(False)
+    current_mode = "off"
+    _publish(MQTT_STATE_TOPIC, current_mode, retain=True)
+    _set_run_state(run_state)
+
+
+def _mode_failed(reason):
+    """The mode process could not start or has exited (call with _mode_lock held).
+
+    Relaunch the same mode after a growing delay (RESTART_DELAYS), keeping the
+    screen and labwc as they are; after the last try, give up and switch off.
+    """
+    global _restart_attempts, _pending_restart
+    mono = time.monotonic()
+    if _mode_started_at and mono - _mode_started_at > RESTART_STABLE_AFTER:
+        _restart_attempts = 0  # It had been running fine: start counting again
+    if _restart_attempts < len(RESTART_DELAYS):
+        delay = RESTART_DELAYS[_restart_attempts]
+        _restart_attempts += 1
+        logging.error(
+            f"FAIL-SAFE: Mode '{current_mode}' {reason}. Relaunching in {delay}s "
+            f"(try {_restart_attempts}/{len(RESTART_DELAYS)})."
+        )
+        _pending_restart = (current_mode, mono + delay)
+        _set_run_state(RUN_RETRYING)
+    else:
+        logging.error(
+            f"FAIL-SAFE: Mode '{current_mode}' {reason} after {len(RESTART_DELAYS)} "
+            "relaunches. Resetting to 'off'."
+        )
+        _restart_attempts = 0
+        _pending_restart = None
+        _go_off(RUN_FAILED)
+
+
+def supervise_mode():
+    """Watchdog tick, from the main loop (call with _mode_lock held): notice a crashed
+    mode process, mark a mode as running once it has lived a moment, fire retries."""
+    global current_process, _pending_restart
+    proc = current_process  # Snapshot: the global can change
+    if current_mode != "off" and proc is not None:
+        code = proc.poll()
+        if code is not None:
+            current_process = None
+            _mode_failed(f"exited (code {code})")
+        elif _run_state == RUN_STARTING and time.monotonic() - _mode_started_at >= RUNNING_AFTER:
+            _set_run_state(RUN_RUNNING)
+
+    if _pending_restart and time.monotonic() >= _pending_restart[1]:
+        retry_mode = _pending_restart[0]
+        _pending_restart = None
+        command_queue.put(("restart", retry_mode))
+
+
 def start_mode(mode, restart=False):
-    """Switch to `mode`. restart=True is the watchdog relaunching a crashed mode."""
-    global current_process, current_mode, mqtt_client
+    """Switch to `mode` (call with _mode_lock held). restart=True is the watchdog
+    relaunching a crashed mode."""
+    global current_process, current_mode
     global _restart_attempts, _pending_restart, _mode_started_at
 
-    mode = mode.lower()
+    mode = str(mode).lower()
     # Same mode and still running: nothing to do. (Same mode with no process means
     # it crashed and waits for a retry: choosing it again relaunches it now.)
     if mode == current_mode and (mode == "off" or current_process is not None):
-        if mqtt_client and mqtt_client.is_connected():
-            mqtt_client.publish(MQTT_STATE_TOPIC, current_mode, retain=True)
+        _publish(MQTT_STATE_TOPIC, current_mode, retain=True)
         return
 
     if not restart:
@@ -979,26 +1112,46 @@ def start_mode(mode, restart=False):
         _restart_attempts = 0
         _pending_restart = None
 
+    if mode != "off" and mode not in get_available_modes():
+        logging.warning(f"Unknown mode: {mode}. Available modes: {get_available_modes()}")
+        _go_off(RUN_FAILED)
+        return
+
     previous_mode = current_mode
     logging.info(f"Transitioning mode: {previous_mode} -> {mode}")
     perf.begin_switch(mode)  # PERF
 
-    # 1. Publish intent IMMEDIATELY so HA sees the change instantly.
+    # 1. Publish the choice IMMEDIATELY so the HA selector reacts at once. Whether the
+    #    mode really runs is published separately (run state: starting -> running).
     current_mode = mode
-    if mqtt_client and mqtt_client.is_connected():
-        mqtt_client.publish(MQTT_STATE_TOPIC, current_mode, retain=True)
+    _publish(MQTT_STATE_TOPIC, current_mode, retain=True)
+
+    if mode == "off":
+        logging.info("Ensuring display power is OFF.")
+        _go_off(RUN_OFF)
+        perf.mark("old_mode_stopped")  # PERF
+        return
+
+    _set_run_state(RUN_STARTING)
+    _mode_started_at = time.monotonic()
 
     # 2. Stop the current mode's client process (labwc compositor stays alive).
     stop_current_mode()
     perf.mark("old_mode_stopped")  # PERF
 
-    if mode == "off":
-        logging.info("Ensuring display power is OFF.")
-        _stop_labwc()  # Tear down compositor when going fully off
-        set_display_power(False)
+    try:
+        current_process = _launch_mode(mode, previous_mode)
+    except Exception as e:
+        current_process = None
+        _mode_failed(f"could not start ({e})")
         return
+    _mode_started_at = time.monotonic()
+    perf.mark("process_launched")  # PERF
 
-    # 3. Start display power ON and labwc compositor IN PARALLEL.
+
+def _launch_mode(mode, previous_mode):
+    """Turn the screen on, make sure labwc runs, start the mode process. Returns it."""
+    # 1. Start display power ON and labwc compositor IN PARALLEL.
     #    On Pi Zero 2 cold boot, labwc takes 6-8s to create its Wayland socket.
     #    Overlapping with display power-on (~3s) hides most of that latency.
     display_thread = None
@@ -1020,42 +1173,39 @@ def start_mode(mode, restart=False):
         labwc_thread = threading.Thread(target=_start_labwc_parallel, daemon=True)
         labwc_thread.start()
 
-    # 4. Resolve mode script (runs while display + labwc warm up).
-    modes_dir = os.path.join(os.path.dirname(__file__), "modes")
-    py_script = os.path.join(modes_dir, f"{mode}_mode.py")
-    sh_script = os.path.join(modes_dir, f"{mode}_mode.sh")
-
-    base_cmd = []
+    # 2. Resolve mode script (runs while display + labwc warm up).
+    py_script = os.path.join(MODES_DIR, f"{mode}_mode.py")
+    sh_script = os.path.join(MODES_DIR, f"{mode}_mode.sh")
     if os.path.exists(sh_script):
         base_cmd = ["bash", sh_script]
     elif os.path.exists(py_script):
         base_cmd = [sys.executable, py_script]
     else:
-        available = get_available_modes()
-        logging.warning(f"Unknown mode: {mode}. Available modes: {available}")
-        current_mode = "off"
-        _stop_labwc()
-        set_display_power(False)
-        if mqtt_client and mqtt_client.is_connected():
-            mqtt_client.publish(MQTT_STATE_TOPIC, current_mode, retain=True)
-        return
+        raise RuntimeError(f"no script for mode '{mode}' in {MODES_DIR}")
 
-    # 5. Wait for display power ON and labwc to be ready.
+    # 3. Wait for display power ON and labwc to be ready.
     if display_thread:
         display_thread.join(timeout=4.0)
     if labwc_thread:
         labwc_thread.join(timeout=12.0)
     perf.mark("display_and_labwc_ready")  # PERF
 
-    # 6. Prepare mode-specific environment variables.
+    # 4. Prepare mode-specific environment variables.
     env = os.environ.copy()
     audio_idx = _discover_audio_device()
-    env["SMARTFRAME_AUDIO_DEVICE"] = str(
-        audio_idx if audio_idx is not None else ""
-    )
+    env["SMARTFRAME_AUDIO_DEVICE"] = str(audio_idx if audio_idx is not None else "")
+    # Lets the audio mode check that the index still points to the same mic
+    if AUDIO_CONFIG.get("device_index") is None and _working_methods.get("audio_device_name"):
+        env["SMARTFRAME_AUDIO_DEVICE_NAME"] = _working_methods["audio_device_name"]
+    else:
+        env.pop("SMARTFRAME_AUDIO_DEVICE_NAME", None)
     env["SMARTFRAME_DEBUG"] = "1" if DEBUG_MODE else "0"
+    # Python buffers print() when not writing to a terminal: without this, the mode's
+    # messages only reach journald when it stops.
+    env["PYTHONUNBUFFERED"] = "1"
+    env["SMARTFRAME_SCREEN_SIZE"] = SCREEN_SIZE
     if mode == "mirror":
-        env["MIRROR_URL"] = config.get("magic_mirror", {}).get(
+        env["MIRROR_URL"] = (config.get("magic_mirror") or {}).get(
             "url", "http://localhost:8080"
         )
 
@@ -1068,7 +1218,7 @@ def start_mode(mode, restart=False):
         elif _labwc_wayland_display:
             env["WAYLAND_DISPLAY"] = _labwc_wayland_display
 
-    # 7. Launch the mode process. The audio mode gets the write end of a private
+    # 5. Launch the mode process. The audio mode gets the write end of a private
     #    pipe for its sound levels (only that process: pass_fds, not inherited by
     #    anything else). We close our copy so EOF arrives when it exits.
     level_r = level_w = None
@@ -1077,7 +1227,7 @@ def start_mode(mode, restart=False):
         env["SMARTFRAME_LEVEL_FD"] = str(level_w)
     logging.info(f"Launching '{mode}' mode (cmd: {' '.join(base_cmd)}).")
     try:
-        current_process = subprocess.Popen(
+        proc = subprocess.Popen(
             base_cmd, env=env, start_new_session=True, stdout=None, stderr=None,
             pass_fds=(level_w,) if level_w is not None else (),
         )
@@ -1088,158 +1238,75 @@ def start_mode(mode, restart=False):
     finally:
         if level_w is not None:
             os.close(level_w)
-    _mode_started_at = time.monotonic()
-    perf.mark("process_launched")  # PERF
     if level_r is not None:
         threading.Thread(target=_read_level_pipe, args=(level_r,), daemon=True).start()
+    return proc
 
 
 # MQTT Callbacks
-def publish_discovery_and_status(client):
-    modes = get_available_modes()
+DISCOVERY_DELAY = 3.0  # Seconds between clearing the old entities and announcing the new ones
 
-    # 1. Publish status (online)
-    client.publish(MQTT_STATUS_TOPIC, "online", retain=True)
 
-    # 2. Publish list of available modes
-    client.publish(MQTT_AVAILABLE_MODES_TOPIC, json.dumps(modes), retain=True)
-
-    # 3. Publish Home Assistant Discovery payload for Mode Selector
-    discovery_topic = f"{MQTT_DISCOVERY_PREFIX}/select/smartframe/mode/config"
-    discovery_payload = {
-        "name": "SmartFrame Mode",
-        "unique_id": "smartframe_mode_selector",
-        "command_topic": MQTT_COMMAND_TOPIC,
-        "state_topic": MQTT_STATE_TOPIC,
-        "options": modes,
-        "availability": [{"topic": MQTT_STATUS_TOPIC}],
-        "device": {
-            "identifiers": ["smartframe_orchestrator"],
-            "name": "Smart Frame",
-            "manufacturer": "Custom",
-            "model": "Smart Frame V1",
-        },
+def _discovery_topics():
+    return {
+        "command": MQTT_COMMAND_TOPIC,
+        "state": MQTT_STATE_TOPIC,
+        "status": MQTT_STATUS_TOPIC,
+        "run_state": MQTT_RUN_STATE_TOPIC,
+        "dba": MQTT_DBA_STATE_TOPIC,
+        "brightness_cmd": MQTT_BRIGHTNESS_COMMAND_TOPIC,
+        "brightness_state": MQTT_BRIGHTNESS_STATE_TOPIC,
+        "contrast_cmd": MQTT_CONTRAST_COMMAND_TOPIC,
+        "contrast_state": MQTT_CONTRAST_STATE_TOPIC,
+        "color_preset_cmd": MQTT_COLOR_PRESET_COMMAND_TOPIC,
+        "color_preset_state": MQTT_COLOR_PRESET_STATE_TOPIC,
+        "input_source_cmd": MQTT_INPUT_SOURCE_COMMAND_TOPIC,
+        "input_source_state": MQTT_INPUT_SOURCE_STATE_TOPIC,
     }
-    client.publish(discovery_topic, json.dumps(discovery_payload), retain=True)
 
-    # 4. Publish Discovery for Brightness, Contrast, Color Preset, and Input
-    client.publish(
-        f"{MQTT_DISCOVERY_PREFIX}/number/smartframe/brightness/config",
-        json.dumps(
-            {
-                "name": "SmartFrame Brightness",
-                "unique_id": "sf_brightness",
-                "command_topic": MQTT_BRIGHTNESS_COMMAND_TOPIC,
-                "state_topic": MQTT_BRIGHTNESS_STATE_TOPIC,
-                "min": 0,
-                "max": 100,
-                "step": 5,
-                "unit_of_measurement": "%",
-                "icon": "mdi:brightness-6",
-                "availability": [{"topic": MQTT_STATUS_TOPIC}],
-                "device": {"identifiers": ["smartframe_orchestrator"]},
-            }
-        ),
-        retain=True,
-    )
 
-    client.publish(
-        f"{MQTT_DISCOVERY_PREFIX}/number/smartframe/contrast/config",
-        json.dumps(
-            {
-                "name": "SmartFrame Contrast",
-                "unique_id": "sf_contrast",
-                "command_topic": MQTT_CONTRAST_COMMAND_TOPIC,
-                "state_topic": MQTT_CONTRAST_STATE_TOPIC,
-                "min": 0,
-                "max": 100,
-                "step": 5,
-                "unit_of_measurement": "%",
-                "icon": "mdi:contrast",
-                "availability": [{"topic": MQTT_STATUS_TOPIC}],
-                "device": {"identifiers": ["smartframe_orchestrator"]},
-            }
-        ),
-        retain=True,
-    )
+def clear_legacy_discovery(client):
+    """Remove the entities of older versions (fixed IDs, node "smartframe"): an empty
+    retained config tells HA to delete them. Harmless when they are already gone."""
+    for topic in ha.legacy_discovery_topics(MQTT_DISCOVERY_PREFIX):
+        client.publish(topic, "", retain=True)
 
-    client.publish(
-        f"{MQTT_DISCOVERY_PREFIX}/select/smartframe/color_preset/config",
-        json.dumps(
-            {
-                "name": "SmartFrame Color Profile",
-                "unique_id": "sf_color_preset",
-                "command_topic": MQTT_COLOR_PRESET_COMMAND_TOPIC,
-                "state_topic": MQTT_COLOR_PRESET_STATE_TOPIC,
-                "options": list(COLOR_PRESETS),
-                "icon": "mdi:palette",
-                "availability": [{"topic": MQTT_STATUS_TOPIC}],
-                "device": {"identifiers": ["smartframe_orchestrator"]},
-            }
-        ),
-        retain=True,
-    )
 
-    client.publish(
-        f"{MQTT_DISCOVERY_PREFIX}/select/smartframe/input_source/config",
-        json.dumps(
-            {
-                "name": "SmartFrame Input",
-                "unique_id": "sf_input",
-                "command_topic": MQTT_INPUT_SOURCE_COMMAND_TOPIC,
-                "state_topic": MQTT_INPUT_SOURCE_STATE_TOPIC,
-                "options": ["HDMI-1", "HDMI-2", "DisplayPort-1", "VGA"],
-                "icon": "mdi:video-input-hdmi",
-                "availability": [{"topic": MQTT_STATUS_TOPIC}],
-                "device": {"identifiers": ["smartframe_orchestrator"]},
-            }
-        ),
-        retain=True,
-    )
-
-    # Sound level (LAeq of each second). device_class + state_class give long-term
-    # statistics in HA. (unique_id unchanged so the existing history is kept.)
-    client.publish(
-        f"{MQTT_DISCOVERY_PREFIX}/sensor/smartframe/dba/config",
-        json.dumps(
-            {
-                "name": "SmartFrame Ambient Sound",
-                "unique_id": "sf_audio_dba",
-                "state_topic": MQTT_DBA_STATE_TOPIC,
-                "unit_of_measurement": "dBA",
-                "device_class": "sound_pressure",
-                "state_class": "measurement",
-                "suggested_display_precision": 1,
-                "icon": "mdi:ear-hearing",
-                "availability": [{"topic": MQTT_STATUS_TOPIC}],
-                "device": {"identifiers": ["smartframe_orchestrator"]},
-            }
-        ),
-        retain=True,
-    )
-
+def publish_discovery_and_status(client):
+    if not client.is_connected():
+        return
+    modes = get_available_modes()
+    client.publish(MQTT_STATUS_TOPIC, "online", retain=True)
+    client.publish(MQTT_AVAILABLE_MODES_TOPIC, json.dumps(modes), retain=True)
+    for topic, payload in ha.discovery_messages(
+        MQTT_DISCOVERY_PREFIX, DEVICE_ID, _discovery_topics(), modes,
+        COLOR_PRESETS, INPUT_SOURCES,
+    ):
+        client.publish(topic, json.dumps(payload), retain=True)
     logging.info(
-        "Published Home Assistant MQTT discovery payloads (Universal Display Control + Audio)."
+        f"Published Home Assistant MQTT discovery payloads (device '{DEVICE_ID}')."
     )
 
 
 def on_connect(client, userdata, _connect_flags, reason_code, _properties):
-    global current_mode
     if not reason_code.is_failure:
         logging.info("Connected to MQTT broker.")
         perf.mark("mqtt_connected")  # PERF
-        client.subscribe(MQTT_COMMAND_TOPIC)
-        client.subscribe(MQTT_BRIGHTNESS_COMMAND_TOPIC)
-        client.subscribe(MQTT_CONTRAST_COMMAND_TOPIC)
-        client.subscribe(MQTT_COLOR_PRESET_COMMAND_TOPIC)
-        client.subscribe(MQTT_INPUT_SOURCE_COMMAND_TOPIC)
-        logging.info("Subscribed to all universal display control topics.")
+        for topic in _command_routes():
+            client.subscribe(topic)
+        logging.info(f"Subscribed to the command topics (device '{DEVICE_ID}').")
 
-        publish_discovery_and_status(client)
+        client.publish(MQTT_STATUS_TOPIC, "online", retain=True)
+        # Old entities first; the new ones a moment later, so HA has deleted the old
+        # ones and gives the new ones the same entity_id (dashboards keep working).
+        clear_legacy_discovery(client)
+        timer = threading.Timer(DISCOVERY_DELAY, publish_discovery_and_status, args=(client,))
+        timer.daemon = True
+        timer.start()
 
         # Publish current state on connect
-        if current_mode:
-            client.publish(MQTT_STATE_TOPIC, current_mode, retain=True)
+        client.publish(MQTT_STATE_TOPIC, current_mode, retain=True)
+        client.publish(MQTT_RUN_STATE_TOPIC, _run_state, retain=True)
 
         # Publish current display settings on connect
         client.publish(
@@ -1323,9 +1390,19 @@ def command_worker():
                 set_display_color_preset(payload)
             elif cmd == "input_source":
                 set_display_input_source(payload)
-            command_queue.task_done()
-        except Exception as e:
-            logging.error(f"Command worker error: {e}")
+        except Exception:
+            logging.exception("Command worker error")
+
+
+def _command_routes():
+    """Command topic -> command name for the worker."""
+    return {
+        MQTT_COMMAND_TOPIC: "mode",
+        MQTT_BRIGHTNESS_COMMAND_TOPIC: "brightness",
+        MQTT_CONTRAST_COMMAND_TOPIC: "contrast",
+        MQTT_COLOR_PRESET_COMMAND_TOPIC: "color_preset",
+        MQTT_INPUT_SOURCE_COMMAND_TOPIC: "input_source",
+    }
 
 
 def on_message(client, userdata, msg):
@@ -1338,41 +1415,19 @@ def on_message(client, userdata, msg):
 
 
 def _handle_message(msg):
-    # For general commands, we want to preserve case (especially for presets).
-    # errors="replace": invalid UTF-8 bytes must not raise (see on_message).
-    payload_raw = msg.payload.decode("utf-8", errors="replace").strip()
-    payload_lower = payload_raw.lower()
-
-    logging.info(f"Message received on {msg.topic}: {payload_raw!r}")
-
-    if msg.topic == MQTT_COMMAND_TOPIC:
-        available_modes = get_available_modes()
-        if payload_lower in available_modes:
-            command_queue.put(("mode", payload_lower))
-        else:
-            logging.warning(
-                f"Invalid mode payload '{payload_raw}'. Available modes: {available_modes}"
-            )
-
-    elif msg.topic == MQTT_BRIGHTNESS_COMMAND_TOPIC:
-        try:
-            command_queue.put(("brightness", int(payload_raw)))
-        except ValueError:
-            logging.warning(f"Invalid brightness payload: {payload_raw}")
-
-    elif msg.topic == MQTT_CONTRAST_COMMAND_TOPIC:
-        try:
-            command_queue.put(("contrast", int(payload_raw)))
-        except ValueError:
-            logging.warning(f"Invalid contrast payload: {payload_raw}")
-
-    elif msg.topic == MQTT_COLOR_PRESET_COMMAND_TOPIC:
-        # Use raw payload to match preset names exactly
-        command_queue.put(("color_preset", payload_raw))
-
-    elif msg.topic == MQTT_INPUT_SOURCE_COMMAND_TOPIC:
-        # Use raw payload to match source names exactly
-        command_queue.put(("input_source", payload_raw))
+    cmd = _command_routes().get(msg.topic)
+    if cmd is None:
+        return
+    # Debug level: an HA slider sends many messages (journald writes to the SD card)
+    logging.debug(f"Message received on {msg.topic}: {msg.payload[:100]!r}")
+    command = parse_command(cmd, msg.payload, get_available_modes())
+    if command is None:
+        logging.warning(
+            f"Invalid {cmd} payload on {msg.topic}: {msg.payload[:100]!r}"
+            + (f" (available modes: {get_available_modes()})" if cmd == "mode" else "")
+        )
+        return
+    command_queue.put(command)
 
 
 def signal_handler(sig, frame):
@@ -1498,55 +1553,19 @@ if __name__ == "__main__":
             now = time.time()
             # One bad iteration must never stop the whole orchestrator.
             try:
-                # 1. Watchdog: check if the current mode process has crashed.
+                # 1. Watchdog: crashed mode -> retry / off, starting -> running.
                 # Skip this tick if a mode switch is in progress: the worker is
                 # stopping/starting processes and the state is in between.
                 if _mode_lock.acquire(blocking=False):
                     try:
-                        proc = current_process  # Snapshot: the global can change
-                        poll_res = proc.poll() if proc is not None else None
-                        if current_mode != "off" and proc is not None and poll_res is not None:
-                            current_process = None
-                            mono = time.monotonic()
-                            if mono - _mode_started_at > RESTART_STABLE_AFTER:
-                                _restart_attempts = 0  # It had been running fine
-                            if _restart_attempts < len(RESTART_DELAYS):
-                                # Keep the mode, the screen and labwc as they are, and
-                                # relaunch after a growing delay.
-                                delay = RESTART_DELAYS[_restart_attempts]
-                                _restart_attempts += 1
-                                logging.error(
-                                    f"FAIL-SAFE: Mode process '{current_mode}' exited "
-                                    f"(code {poll_res}). Relaunching in {delay}s "
-                                    f"(try {_restart_attempts}/{len(RESTART_DELAYS)})."
-                                )
-                                _pending_restart = (current_mode, mono + delay)
-                            else:
-                                logging.error(
-                                    f"FAIL-SAFE: Mode process '{current_mode}' exited "
-                                    f"(code {poll_res}) after {len(RESTART_DELAYS)} "
-                                    "relaunches. Resetting to 'off'."
-                                )
-                                _restart_attempts = 0
-                                _pending_restart = None
-                                _stop_labwc()
-                                set_display_power(False)
-                                current_mode = "off"
-                                if mqtt_client and mqtt_client.is_connected():
-                                    mqtt_client.publish(MQTT_STATE_TOPIC, current_mode, retain=True)
-
-                        if _pending_restart and time.monotonic() >= _pending_restart[1]:
-                            retry_mode = _pending_restart[0]
-                            _pending_restart = None
-                            command_queue.put(("restart", retry_mode))
+                        supervise_mode()
                     finally:
                         _mode_lock.release()
 
                 # 2. Aggressive UI Sync: Re-publish state every 5s to keep HA dashboard accurate
                 if now - last_sync_time > 5.0:
-                    if mqtt_client and mqtt_client.is_connected():
-                        mqtt_client.publish(MQTT_STATE_TOPIC, current_mode, retain=True)
-                        mqtt_client.publish(MQTT_BRIGHTNESS_STATE_TOPIC, str(_working_methods.get("brightness", 100)), retain=True)
+                    _publish(MQTT_STATE_TOPIC, current_mode, retain=True)
+                    _publish(MQTT_BRIGHTNESS_STATE_TOPIC, str(_working_methods.get("brightness", 100)), retain=True)
                     last_sync_time = now
 
                 # 3. Global Re-announcement: Re-publish discovery every 5 mins

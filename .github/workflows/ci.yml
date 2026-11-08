@@ -1,14 +1,14 @@
 name: CI
 
 # Kept minimal to save GitHub Actions minutes:
-# - runs only when code files change
+# - runs only when code or dependency files change
 # - one small job, cancelled if a newer push arrives
 on:
   push:
     branches: [main]
-    paths: ['**.py', '**.sh', '**.hook', 'ruff.toml', 'requirements-dev.txt', '.github/workflows/ci.yml']
+    paths: ['**.py', '**.sh', '**.hook', 'ruff.toml', 'requirements*.txt', 'tests/**', '.github/workflows/ci.yml']
   pull_request:
-    paths: ['**.py', '**.sh', '**.hook', 'ruff.toml', 'requirements-dev.txt', '.github/workflows/ci.yml']
+    paths: ['**.py', '**.sh', '**.hook', 'ruff.toml', 'requirements*.txt', 'tests/**', '.github/workflows/ci.yml']
 
 concurrency:
   group: ci-${{ github.ref }}
@@ -18,12 +18,25 @@ permissions:
   contents: read
 
 jobs:
-  lint:
+  check:
     runs-on: ubuntu-latest
-    timeout-minutes: 3
+    timeout-minutes: 5
     steps:
       - uses: actions/checkout@v4
-      - name: Install ruff  # shellcheck is preinstalled on ubuntu runners
-        run: pip install --quiet "$(grep '^ruff==' requirements-dev.txt)"
+      - name: Install tools  # shellcheck is preinstalled on ubuntu runners
+        # Only what the tests need: pygame/pyaudio (PortAudio, SDL) are not installed,
+        # the tests never import them.
+        run: |
+          pip install --quiet \
+            "$(grep '^ruff==' requirements-dev.txt)" \
+            "$(grep '^pytest==' requirements-dev.txt)" \
+            "$(grep '^pip-audit==' requirements-dev.txt)" \
+            "$(grep '^numpy==' requirements.txt)" \
+            "$(grep '^PyYAML==' requirements.txt)"
       - name: Lint
         run: scripts/lint.sh
+      - name: Tests
+        run: python -m pytest -q
+      - name: Known vulnerabilities in the dependencies
+        # Pinned versions only (no install, nothing to build)
+        run: pip-audit -r requirements.txt --no-deps --disable-pip

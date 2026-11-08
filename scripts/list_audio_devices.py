@@ -4,6 +4,9 @@ import yaml
 import os
 import sys
 
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
+from smartframe import config_edit  # noqa: E402
+
 def get_devices():
     # Temporarily redirect stderr to /dev/null to suppress ALSA/JACK errors
     devnull = os.open(os.devnull, os.O_WRONLY)
@@ -12,9 +15,10 @@ def get_devices():
     os.dup2(devnull, 2)
     os.close(devnull)
     
+    p = None
+    devices = []
     try:
         p = pyaudio.PyAudio()
-        devices = []
     
         for i in range(p.get_device_count()):
             try:
@@ -32,10 +36,11 @@ def get_devices():
         os.dup2(old_stderr, 2)
         os.close(old_stderr)
         
-    try:
-        p.terminate()
-    except Exception:
-        pass
+    if p is not None:
+        try:
+            p.terminate()
+        except Exception as e:
+            print(f"Warning: PyAudio cleanup failed: {e}")
 
     return devices
 
@@ -83,16 +88,24 @@ def update_config(selected_index):
 
     try:
         with open(config_path, 'r') as f:
-            config = yaml.safe_load(f) or {}
+            text = f.read()
 
-        if 'audio' not in config:
-            config['audio'] = {}
+        # Change only the device_index line, so the comments in config.yaml are kept
+        new_text = config_edit.set_value(text, 'audio', 'device_index', selected_index)
+        if new_text is None:
+            # Unusual layout: rewrite the whole file (comments are lost), keep a backup
+            backup = config_path + '.bak'
+            with open(backup, 'w') as f:
+                f.write(text)
+            os.chmod(backup, 0o600)
+            config = yaml.safe_load(text) or {}
+            config.setdefault('audio', {})['device_index'] = selected_index
+            new_text = yaml.dump(config, default_flow_style=False, sort_keys=False)
+            print(f"Note: config.yaml was rewritten (comments lost). Backup: {backup}")
 
-        config['audio']['device_index'] = selected_index
-        
         with open(config_path, 'w') as f:
-            yaml.dump(config, f, default_flow_style=False, sort_keys=False)
-            
+            f.write(new_text)
+
         idx_str = str(selected_index) if selected_index is not None else "null"
         print(f"Success! Updated config.yaml: audio.device_index set to {idx_str}")
         

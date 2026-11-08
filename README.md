@@ -74,22 +74,26 @@ or force the kernel by adding into `/boot/firmware/cmdline.txt`:
 
 ## Performance Optimization (Pi Zero 2 WH)
 
-The Pi Zero 2 WH has limited RAM (512MB). To prevent Chromium from crashing and maintain a "snappy" UI, it is highly recommended to increase the swap size to 1.5GB using native Linux tools:
+The Pi Zero 2 WH has limited RAM (512MB). Use **zram** (compressed swap in RAM) as the main swap: it is fast and does not wear out the SD card. A small swap file on the SD card is only a safety net for rare peaks.
 
 ```bash
-# 1. Disable a-la-carte swap scripts (if any)
-sudo apt remove -y rpi-swap dphys-swapfile systemd-zram-generator
+# 1. Check what you have. Recent Raspberry Pi OS versions already set up zram
+#    (a /dev/zram0 line): then skip step 2.
+swapon --show
 
-# 2. Create a permanent 1.5GB swap file
-sudo swapoff -a
-sudo fallocate -l 1.5G /swapfile
+# 2. zram, about half of the RAM, compressed with zstd
+sudo apt install -y systemd-zram-generator
+printf '[zram0]\nzram-size = ram / 2\ncompression-algorithm = zstd\nswap-priority = 100\n' \
+  | sudo tee /etc/systemd/zram-generator.conf
+sudo systemctl daemon-reload && sudo systemctl start systemd-zram-setup@zram0
+
+# 3. Optional safety net: a small 512 MB swap file, used only when zram is full
+#    (lower priority). Skip it if your OS already has a swap file.
+sudo fallocate -l 512M /swapfile
 sudo chmod 600 /swapfile
 sudo mkswap /swapfile
-sudo swapon /swapfile
-
-# 3. Make it permanent on boot:
-# Open /etc/fstab and add this line at the bottom:
-/swapfile none swap sw 0 0
+sudo swapon --priority 10 /swapfile
+echo '/swapfile none swap sw,pri=10 0 0' | sudo tee -a /etc/fstab
 ```
 
 SmartFrame automatically detects the GPU state and will enable hardware-accelerated 2D canvas and GLES2 rendering if available.
@@ -116,20 +120,44 @@ The setup script installs all OS-level dependencies (`portaudio`, SDL2, Chromium
 The setup script creates `config.yaml` from `config.example.yaml` automatically. Edit `config.yaml` to set your preferences (it is gitignored):
 
 - **MQTT**: Set up your broker IP, port, and credentials. Set `tls: true` (and usually `port: 8883`) if your broker supports TLS; `ca_cert` can point to the broker's CA certificate. See [Security](#security).
+  - `device_id`: (Optional) name of this frame. Empty = the Pi's hostname. It replaces `{device_id}` in the topics and is part of every Home Assistant ID, so several frames can share one broker. Changing it (or the hostname) creates new entities in Home Assistant.
 - **MagicMirror**: Set the URL corresponding to your local MagicMirror instance.
+- **Screen**: `screen_size` (e.g. `"1920x1080"`) is the size the Mirror browser starts with. The audio screen uses the real screen size and scales its layout.
+- **`keep_compositor_when_off`**: `true` keeps the compositor (labwc) running in `off` mode, with the screen switched off. The next mode then starts without the 6-8 s cold start, but some RAM stays in use. Default `false`.
 - **Audio Mode**:
   - `threshold_db_warning`: Volume (in dB) where the dB text will turn yellow/orange (default: 60).
   - `threshold_db_error`: Volume (in dB) where the dB text will turn red (default: 85).
   - `device_index`: (Optional) Manual ALSA microphone index. If left blank, the SmartFrame will automatically discover and cache the best device (e.g. INMP441 I2S) for you. When set, it always wins over auto-discovery (`scripts/list_audio_devices.py` helps you pick it).
   - `mic_channel`: `"left"` when the mic's L/R pin goes to GND (as in the wiring above), `"right"` when it goes to 3.3V. On a stereo I2S device only this channel is used (averaging with the silent one would lose 6 dB).
-  - `calibration_offset_db`: added to every reading. Calibrate it against a sound level meter (or a phone/smartwatch app) in a moderately loud, steady sound (60–70 dBA).
+  - `capture_bits`: `16` (default) or `32`. 32 keeps the full 24-bit resolution of the INMP441 (better in very quiet rooms). The calibration stays the same. Go back to 16 if the microphone does not open.
+  - `calibration_offset_db`: added to every reading. The default, `33`, is the theoretical value for the INMP441 (datasheet). Fine-tune it as described in [Calibrating the sound level](#calibrating-the-sound-level).
+  - `calibration_slope`: (Optional) second calibration point. `1.0` = offset only.
   - `noise_floor_dba`: (Optional) the mic's own noise in dBA, removed from every reading in energy. Set it **after** calibrating, either with `scripts/measure_noise_floor.py` (stop the service first, measure in a very quiet room) or with the INMP441 datasheet value (about 33). Leave it empty for no correction.
+  - `show_debug`: `true` (default) shows the CPU stats and the "FAST RESPONSE | SLOPE" line on the audio screen. `false` hides them.
+  - `render_scale`: `1.0` (default) draws at the screen's resolution. `0.5` draws at half resolution and lets the GPU scale it up: about 4x fewer pixels to draw, slightly softer image.
 
 ### Sound level: what the numbers mean
 
 - Home Assistant receives, every second, the **LAeq** of that second (energy average, so a short loud noise between two updates is not missed). Both modes compute it with the same code (`smartframe/dsp.py`), so the sensor does not jump when the mode changes.
 - The big number on the audio screen is more reactive (instant rise, short hold), so it can read a little above the Home Assistant value.
-- It is a relative dBA with a single-point calibration: accurate near the calibration level, indicative far from it. Readings close to or below `noise_floor_dba` are indicative only.
+- It is a relative dBA: accurate near the calibration point(s), indicative far from them. Readings close to or below `noise_floor_dba` are indicative only.
+- Limits: the INMP441 is not flat in frequency (less bass), the reference is often a phone app (itself ±2-3 dB), and the ALSA chain may change the scale. Expect a few dB of error, not a certified sound level meter.
+- The spectrum bars have their own visual scale: they do not move when you change the calibration.
+
+### Calibrating the sound level
+
+You need a reference: a sound level meter, or a phone/smartwatch app (set to dBA, "fast" or "1 s" average).
+
+**With the script (easiest):** stop the service (`sudo systemctl stop smartframe`), then run `.venv/bin/python scripts/calibrate.py`. It measures for 15 s, asks what your reference read (its average over the same time), computes the offset (and the slope if you add a 2nd point) and writes them into `config.yaml`. The steps below do the same by hand.
+
+1. **Offset (1 point).** Make a steady sound around 65 dBA (music or a TV at normal volume, or pink noise from a speaker). Put the phone next to the frame's microphone. Compare the phone with the **SmartFrame Ambient Sound** value in Home Assistant (wait 10 s for both to settle). Then:
+   `new calibration_offset_db = old value + (phone - SmartFrame)`
+   Example: offset 33, phone 64, SmartFrame 60 → offset 37.
+2. **Slope (optional, 2nd point).** Only if a quiet or loud level is still off after step 1. Measure a second, different level (e.g. about 40 dBA in a quiet room, or about 85 dBA). Then:
+   `calibration_slope = (phone - 65) / (SmartFrame - 65)`
+   Example: phone 85, SmartFrame 82 → slope (85 - 65) / (82 - 65) = 1.18. The slope pivots around 65 dBA, so step 1 stays valid.
+3. **Noise floor.** Measure it again (`scripts/measure_noise_floor.py`) after changing the calibration.
+4. Restart the service: `sudo systemctl restart smartframe`.
 
 > **Note:** The setup script will warn you if `config.yaml` still has placeholder values and skip the service installation prompt until you configure it.
 
@@ -150,7 +178,9 @@ To install or update the service, run the install script:
 ./scripts/install_service.sh
 ```
 
-This generates the systemd service file from the template (`scripts/smartframe.service`), and installs/starts it.
+This generates the systemd service file from the template (`scripts/smartframe.service`), and installs/starts it. Run it as your normal user, not with `sudo` (it asks for `sudo` itself). After a `git pull` that changes the template, the `post-merge` hook updates the installed unit; if it cannot (password needed), run the script again.
+
+The unit is hardened: the service cannot gain new privileges (`sudo`, setuid) and cannot write system files. If you add a feature that needs more, see the comments in `scripts/smartframe.service`.
 
 ## Universal Display Control (DDC/CI & CEC)
 
@@ -209,7 +239,7 @@ SmartFrame is designed to stay safe on an untrusted local network.
 To ensure maximum responsiveness on the Pi Zero 2 WH, SmartFrame uses an advanced multi-layer caching system:
 
 1. **Hardware Discovery Cache**: Remembers which power command (DDC or CEC) and which HDMI port (`HDMI-1`) works for your setup, skipping slow scans on boot.
-2. **Self-Configuring Audio**: The orchestrator scans for the best microphone on the first run. It caches the hardware index in `.smartframe_cache`, eliminating the 1-2 second delay when switching to Audio Mode.
+2. **Self-Configuring Audio**: The orchestrator scans for the best microphone on the first run. It caches the device index and name in `.smartframe_cache`, eliminating the 1-2 second delay when switching to Audio Mode. If the sound cards are renumbered (e.g. a USB device plugged in), the microphone is found again by name.
 3. **Persistent Browser Profiles**: Both **Chromium** and **Cog** use persistent data directories (`.chromium_profile/` and `.cog_profile/`). This ensures that MagicMirror assets are cached locally.
 4. **Binary Path Caching**: Remembers the exact location of tool binaries to eliminate redundant `which` shell calls.
 
@@ -225,17 +255,25 @@ SmartFrame natively supports **Home Assistant MQTT Auto-Discovery**. Once connec
 | **SmartFrame Color Profile** | `select` | Switch between sRGB, Warm, Natural, and Cool. |
 | **SmartFrame Input** | `select` | Switch monitor input source (HDMI-1, HDMI-2, etc.). |
 | **SmartFrame Ambient Sound** | `sensor` | Sound level (LAeq of each second, dBA), with long-term statistics. |
+| **SmartFrame Run State** | `sensor` (diagnostic) | What the mode really does: `off`, `starting`, `running`, `retrying` (crashed, relaunch planned), `failed` (gave up, switched off). |
+
+The mode selector shows your choice immediately; **Run State** tells whether that mode actually runs.
+
+Every ID contains the device ID (hostname by default), so several frames can share one broker. **Upgrading from a version with fixed IDs:** the frame removes its old entities and creates new ones with the same names, which normally get the same entity IDs (dashboards and automations keep working). Check that the device's area and any customised names are still set, and update any automation that publishes directly to the old `smartframe/...` topics.
 
 ### Advanced MQTT Topics
 
-The orchestrator uses the following topics for integration with other systems (e.g., Node-RED):
+The orchestrator uses the following topics for integration with other systems (e.g., Node-RED). `<id>` is the device ID (the Pi's hostname by default):
 
-- `smartframe/set_mode` / `smartframe/mode_state`
-- `smartframe/set_brightness` / `smartframe/brightness_state`
-- `smartframe/set_contrast` / `smartframe/contrast_state`
-- `smartframe/set_color_preset` / `smartframe/color_preset_state`
-- `smartframe/set_input_source` / `smartframe/input_source_state`
-- `smartframe/audio/dba` (sound level, LAeq of each second)
-- `smartframe/status` (LWT: `online`/`offline`)
-- `smartframe/modes_available` (JSON list of modes)
+- `smartframe/<id>/set_mode` / `smartframe/<id>/mode_state`
+- `smartframe/<id>/run_state` (`off` / `starting` / `running` / `retrying` / `failed`)
+- `smartframe/<id>/set_brightness` / `smartframe/<id>/brightness_state`
+- `smartframe/<id>/set_contrast` / `smartframe/<id>/contrast_state`
+- `smartframe/<id>/set_color_preset` / `smartframe/<id>/color_preset_state`
+- `smartframe/<id>/set_input_source` / `smartframe/<id>/input_source_state`
+- `smartframe/<id>/audio/dba` (sound level, LAeq of each second)
+- `smartframe/<id>/status` (LWT: `online`/`offline`)
+- `smartframe/<id>/modes_available` (JSON list of modes)
+
+Older installs are moved to these topics by `scripts/update_config.py` (run after `git pull`), but only for topics still set to their old default value.
 

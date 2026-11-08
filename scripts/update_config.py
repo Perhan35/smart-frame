@@ -7,12 +7,36 @@ keys that are not in config.example.yaml are only listed, so you can review them
 
 New keys are inserted as text, copied with their comment from config.example.yaml,
 so the comments already in config.yaml are kept.
+
+One-time migration: MQTT topics that still have their old fixed default value
+("smartframe/set_mode"...) get the new per-frame default ("smartframe/{device_id}/...").
+Topics you changed yourself are never touched.
 """
 
 import re
 import sys
 from pathlib import Path
 import yaml
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from smartframe import config_edit  # noqa: E402
+
+# Old fixed defaults of the mqtt: topics (before one ID per frame)
+LEGACY_TOPIC_DEFAULTS = {
+    "topic": "smartframe/set_mode",
+    "state_topic": "smartframe/mode_state",
+    "status_topic": "smartframe/status",
+    "available_modes_topic": "smartframe/modes_available",
+    "dba_state_topic": "smartframe/audio/dba",
+    "brightness_topic": "smartframe/set_brightness",
+    "brightness_state_topic": "smartframe/brightness_state",
+    "contrast_topic": "smartframe/set_contrast",
+    "contrast_state_topic": "smartframe/contrast_state",
+    "color_preset_topic": "smartframe/set_color_preset",
+    "color_preset_state_topic": "smartframe/color_preset_state",
+    "input_source_topic": "smartframe/set_input_source",
+    "input_source_state_topic": "smartframe/input_source_state",
+}
 
 _TOP_KEY = re.compile(r"^([A-Za-z_][\w-]*)\s*:")
 _CHILD_KEY = re.compile(r"^  ([A-Za-z_][\w-]*)\s*:")
@@ -44,6 +68,25 @@ def find_unknown(config: dict, reference: dict, prefix: str = "") -> list[str]:
         elif isinstance(value, dict) and isinstance(reference[key], dict):
             unknown.extend(find_unknown(value, reference[key], full_key))
     return unknown
+
+
+def migrate_topics(config_text: str, config: dict, example: dict) -> tuple[str, list[str]]:
+    """Move topics still at their old fixed default to the example's new default.
+    Returns the new text and the list of migrated keys (text edits keep comments)."""
+    mqtt = config.get("mqtt") or {}
+    new_defaults = example.get("mqtt") or {}
+    migrated = []
+    for key, old in LEGACY_TOPIC_DEFAULTS.items():
+        new = new_defaults.get(key)
+        if mqtt.get(key) != old or not new or new == old:
+            continue
+        new_text = config_edit.set_value(config_text, "mqtt", key, new)
+        if new_text is None:
+            continue  # Unusual layout: leave it (the old topic keeps working)
+        config_text = new_text
+        mqtt[key] = new
+        migrated.append(f"mqtt.{key}: {old} -> {new}")
+    return config_text, migrated
 
 
 def _sections(lines: list[str]) -> dict[str, tuple[int, int]]:
@@ -124,8 +167,19 @@ def main():
     config_text = config_path.read_text()
     config = yaml.safe_load(config_text) or {}
 
+    config_text, migrated = migrate_topics(config_text, config, example)
     unknown_keys = find_unknown(config, example)
     merged, added_keys = deep_merge(config, example)
+
+    if migrated and not added_keys:
+        config_path.write_text(config_text)
+    if migrated:
+        print(f"config.yaml: {len(migrated)} MQTT topic(s) moved to the per-frame default "
+              "({device_id} = this Pi's hostname, or mqtt.device_id):")
+        for line in migrated:
+            print(f"  ~ {line}")
+        print("  Anything that publishes to the old topics directly (scripts, automations) "
+              "must use the new ones.")
 
     if added_keys:
         new_text = insert_keys_as_text(config_text, example_text, added_keys)
@@ -143,7 +197,7 @@ def main():
         for key in added_keys:
             print(f"  + {key}")
         print("Review config.yaml and fill in any placeholder values.")
-    else:
+    elif not migrated:
         print("config.yaml is already up to date.")
 
     if unknown_keys:

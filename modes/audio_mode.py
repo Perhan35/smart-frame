@@ -13,6 +13,7 @@ from contextlib import contextmanager
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 from smartframe import dsp  # noqa: E402
 from smartframe import perf  # noqa: E402  # PERF
+from smartframe.audio_input import pa_format, resolve_device  # noqa: E402
 perf.mark("imports_done")  # PERF
 
 # Load configuration
@@ -22,9 +23,11 @@ config_path = os.path.join(os.path.dirname(__file__), "..", "config.yaml")
 DEVICE_INDEX = None
 THRESHOLD_WARNING = 60
 THRESHOLD_ERROR = 85
-CALIBRATION_OFFSET = 0
-NOISE_FLOOR = None
+METER_SETTINGS = dsp.meter_settings({})
+CAPTURE_BITS = 16
 MIC_CHANNEL = 0
+SHOW_DEBUG = True  # CPU stats + "FAST RESPONSE | SLOPE" badge
+RENDER_SCALE = 1.0  # < 1: draw at a lower resolution and let SDL scale it up
 
 try:
     if os.path.exists(config_path):
@@ -33,16 +36,20 @@ try:
             audio_config = config.get("audio") or {}
             THRESHOLD_WARNING = audio_config.get("threshold_db_warning", 60)
             THRESHOLD_ERROR = audio_config.get("threshold_db_error", 85)
-            CALIBRATION_OFFSET = audio_config.get("calibration_offset_db", 0) or 0
-            NOISE_FLOOR = audio_config.get("noise_floor_dba")
+            METER_SETTINGS = dsp.meter_settings(audio_config)
+            CAPTURE_BITS = dsp.capture_bits(audio_config)
             MIC_CHANNEL = dsp.channel_index(audio_config.get("mic_channel", "left"))
             DEVICE_INDEX = audio_config.get("device_index")
+            SHOW_DEBUG = bool(audio_config.get("show_debug", True))
+            RENDER_SCALE = min(1.0, max(0.25, float(audio_config.get("render_scale") or 1.0)))
 except Exception as e:
     print(f"Warning: could not read config.yaml ({e}). Using defaults.")
 
 DEVICE_INDEX_ENV = os.environ.get("SMARTFRAME_AUDIO_DEVICE")
 if DEVICE_INDEX_ENV and DEVICE_INDEX_ENV != "None" and DEVICE_INDEX_ENV != "":
     DEVICE_INDEX = int(DEVICE_INDEX_ENV)
+# Name of the auto-detected mic: lets us notice an index that now points elsewhere
+DEVICE_NAME = os.environ.get("SMARTFRAME_AUDIO_DEVICE_NAME") or None
 
 # Private pipe to the orchestrator (set by main.py): one "<LAeq> <LAFmax>" line per
 # second, published to Home Assistant. Absent when run by hand (run_dev.sh).
@@ -73,7 +80,7 @@ def send_levels(levels):
 CHUNK_READ = 1536  # Optimized speed (~31Hz updates)
 FFT_SIZE = 8192  # High-fidelity 8k FFT for maximum visual resolution
 FFT_EVERY = 2  # Big FFT on 1 frame out of 2 (~15 Hz): the bars smooth in between
-FORMAT = pyaudio.paInt16
+FORMAT = pa_format(CAPTURE_BITS)
 OPEN_RETRY_S = 3.0  # Retry opening the mic this often (it may still be held)
 # Set from the device when the stream opens (see open_stream)
 CHANNELS = 1
@@ -100,12 +107,8 @@ def ignore_stderr():
 
 
 print("Initializing Audio Mode...")
-with ignore_stderr():
-    # Selective init: skip mixer/joystick/cdrom probing (~300-500ms saved on Pi Zero 2)
-    pygame.display.init()
-    pygame.font.init()
 
-# Display initialization (1080p full screen, intended for a 14" LCD)
+# SDL reads these when the display is initialised, so they are set first.
 if not os.environ.get("DISPLAY") and not os.environ.get("WAYLAND_DISPLAY"):
     # Headless/Console mode detected, force KMSDRM
     os.environ["SDL_VIDEODRIVER"] = "kmsdrm"
@@ -113,7 +116,7 @@ if not os.environ.get("DISPLAY") and not os.environ.get("WAYLAND_DISPLAY"):
     if not os.environ.get("SDL_DRM_DEVICE"):
         os.environ["SDL_DRM_DEVICE"] = "/dev/dri/card0"
 
-# Robust mouse hiding and GPU acceleration for various SDL/Wayland/X11 backends
+# Robust mouse hiding for various SDL/Wayland/X11 backends
 os.environ["SDL_VIDEO_WAYLAND_HIDECURSOR"] = "1"
 os.environ["SDL_MOUSE_RELATIVE"] = "1"
 os.environ["XCURSOR_SIZE"] = "0"
@@ -123,31 +126,56 @@ os.environ["COG_PLATFORM_FDO_SHOW_CURSOR"] = "0"
 HAS_GPU = os.path.exists("/dev/dri/card0") or os.path.exists("/dev/dri/renderD128")
 
 if HAS_GPU:
-    # Force Hardware Acceleration in SDL2 (Very useful for Pi Zero 2 WH)
+    # Ask SDL2 for its GLES2 renderer (used for the window surface on Wayland, and
+    # for the scaling of render_scale). Its real effect is still to be checked on the Pi.
     os.environ["SDL_RENDER_DRIVER"] = "opengles2"
-    os.environ["SDL_HINT_RENDER_DRIVER"] = "opengles2"
-    os.environ["SDL_HINT_RENDER_SCALE_QUALITY"] = (
-        "1"  # Linear scaling for better visuals on GPU
-    )
-    os.environ["SDL_VIDEO_GLES2"] = "1"
-    print("GPU detected: Enabling SDL2 GLES2 hardware acceleration.")
+    print("GPU detected: asking SDL2 for the GLES2 renderer.")
 else:
     print("No GPU detected: Falling back to software/standard rendering.")
 
-try:
-    # Use DOUBLEBUF and HWSURFACE (hints to SDL2 to use the GPU/video memory if available)
-    screen = pygame.display.set_mode(
-        (1920, 1080), pygame.FULLSCREEN | pygame.DOUBLEBUF | pygame.HWSURFACE
-    )
-except pygame.error:
-    # Final fallback to dummy
+
+def _use_dummy_display(reason):
+    """No usable screen: keep running on SDL's dummy driver (the mode still sends dBA)."""
+    print(f"Display unavailable ({reason}). Using the dummy video driver.")
+    pygame.display.quit()  # A new driver is only picked up by a fresh init()
+    os.environ["SDL_VIDEODRIVER"] = "dummy"
+    pygame.display.init()
+
+
+with ignore_stderr():
+    # Selective init: skip mixer/joystick/cdrom probing (~300-500ms saved on Pi Zero 2)
     try:
-        os.environ["SDL_VIDEODRIVER"] = "dummy"
         pygame.display.init()
+    except pygame.error as e:
+        _use_dummy_display(e)
+    pygame.font.init()
+perf.mark("pygame_init_done")  # PERF
+
+
+def _open_screen():
+    """Full screen at the screen's own size (or a fraction of it with render_scale)."""
+    if RENDER_SCALE < 1.0:
+        try:
+            desktop_w, desktop_h = pygame.display.get_desktop_sizes()[0]
+        except (pygame.error, IndexError):
+            desktop_w, desktop_h = 1920, 1080
+        size = (max(1, round(desktop_w * RENDER_SCALE)), max(1, round(desktop_h * RENDER_SCALE)))
+        print(f"Rendering at {size[0]}x{size[1]}, scaled up to {desktop_w}x{desktop_h}.")
+        return pygame.display.set_mode(size, pygame.FULLSCREEN | pygame.SCALED)
+    # DOUBLEBUF and HWSURFACE hint SDL2 to use the GPU/video memory if available
+    return pygame.display.set_mode((0, 0), pygame.FULLSCREEN | pygame.DOUBLEBUF | pygame.HWSURFACE)
+
+
+try:
+    screen = _open_screen()
+except pygame.error as e:
+    try:
+        _use_dummy_display(e)
         screen = pygame.display.set_mode((1, 1))
     except pygame.error:
         print("Fatal error: Could not initialize display.")
         sys.exit(1)
+perf.mark("set_mode_done")  # PERF
 pygame.display.set_caption("SmartFrame - Audio Spectrum Analyzer")
 
 # Hide the mouse cursor (Standard Pygame method)
@@ -183,6 +211,7 @@ except OSError:
 # PyAudio initialization
 with ignore_stderr():
     p = pyaudio.PyAudio()
+perf.mark("pyaudio_init_done")  # PERF
 
 
 def select_input_device(log):
@@ -192,14 +221,15 @@ def select_input_device(log):
     first device that has inputs.
     """
     if DEVICE_INDEX is not None and isinstance(DEVICE_INDEX, int):
-        try:
-            info = p.get_device_info_by_index(DEVICE_INDEX)
-            if info.get("maxInputChannels", 0) > 0:
-                log(f"Using configured audio device ({DEVICE_INDEX}): '{info.get('name')}'")
-                return DEVICE_INDEX, info
-            log(f"Warning: Configured device {DEVICE_INDEX} has no input channels. Probing alternatives...")
-        except Exception as e:
-            log(f"Warning: Primary device {DEVICE_INDEX} check failed: {e}. Searching...")
+        # With a name (auto-detected mic), an index that now points to another device
+        # is not used: the mic is looked up by name instead (ALSA can renumber cards).
+        index, info = resolve_device(p, DEVICE_INDEX, DEVICE_NAME)
+        if info is not None:
+            log(f"Using audio device {index}: '{info.get('name')}'")
+            return index, info
+        log(f"Warning: audio device {DEVICE_INDEX}"
+            + (f" ('{DEVICE_NAME}')" if DEVICE_NAME else "")
+            + " is not usable. Probing alternatives...")
 
     log("Probing system default audio input...")
     try:
@@ -275,21 +305,30 @@ FREQ_RANGES = [
 # Log-spaced band edges (independent of the sample rate)
 band_edges = np.logspace(np.log10(max(1.0, MIN_FREQ)), np.log10(MAX_FREQ), NUM_BANDS + 1)
 band_centers = np.sqrt(band_edges[:-1] * band_edges[1:])
-band_indices = []  # Filled by build_rate_tables()
+# Each band is a run of FFT bins [start, stop). Bins are rate/FFT_SIZE (~5.9 Hz) apart:
+# below ~100 Hz several narrow bands fall back to the same single bin, hence the
+# "staircase" in the bass. That is the FFT resolution, not a bug.
+band_starts = band_stops = band_counts = None  # Filled by build_rate_tables()
+band_db_adjust = None
 _vlf_mask = _nyquist_mask = None
 
 
 def build_rate_tables(sample_rate):
     """FFT bin tables that depend on the sample rate (rebuilt when the mic opens)."""
-    global band_indices, _vlf_mask, _nyquist_mask
+    global band_starts, band_stops, band_counts, band_db_adjust, _vlf_mask, _nyquist_mask
     freqs = np.fft.rfftfreq(FFT_SIZE, 1.0 / sample_rate)
-    band_indices = []
-    for i in range(NUM_BANDS):
-        indices = np.where((freqs >= band_edges[i]) & (freqs < band_edges[i + 1]))[0]
-        # Robustness: If range is too narrow for this FFT resolution, take the nearest bin
-        if len(indices) == 0:
-            indices = np.array([np.argmin(np.abs(freqs - band_centers[i]))])
-        band_indices.append(indices)
+    starts = np.searchsorted(freqs, band_edges[:-1], side="left")
+    stops = np.searchsorted(freqs, band_edges[1:], side="left")
+    for i in np.where(stops <= starts)[0]:
+        # Range too narrow for this FFT resolution: take the nearest bin
+        k = int(np.argmin(np.abs(freqs - band_centers[i])))
+        starts[i], stops[i] = k, k + 1
+    band_starts, band_stops = starts, stops
+    band_counts = (stops - starts).astype(np.float64)
+    # A band's level is the RMS of its bins (power mean). For noise that reads about
+    # 1.05 dB above the old amplitude mean when a band has many bins (0 dB for one
+    # bin): remove that, so the bars and their noise gates stay where they were tuned.
+    band_db_adjust = 10 * np.log10(np.pi / 4) * (1.0 - 1.0 / band_counts)
     _vlf_mask = freqs < 1  # DC/VLF removal mask
     _nyquist_mask = freqs > 22500  # Nyquist cleanup mask
 
@@ -308,6 +347,8 @@ fft_window = np.blackman(FFT_SIZE)
 # We use 1kHz as the zero-crossing reference point
 octaves_from_reference = np.log2(np.array(band_centers) / 1000.0)
 visual_tilt = octaves_from_reference * SLOPE_DB_PER_OCTAVE
+# Tilt + the HF boost for air frequencies (>10kHz), per band
+band_db_shaping = visual_tilt + np.where(band_centers > 10000, HIGH_FREQ_BOOST, 0.0)
 
 # Store last peak positions and velocities for gravity effect
 peak_pos = np.zeros(NUM_BANDS)
@@ -363,10 +404,21 @@ for _i, _fc in enumerate(band_centers):
     noise_gate_thresholds[_i] = _base + _tilt_norm + _boost_norm
 
 # --- LAYOUT (fixed for the session: the screen size never changes) ---
-analyzer_height = screen.get_height() // 2 + 80
-analyzer_y_bottom = screen.get_height() - 150
-bar_spacing = 3  # Tighter spacing for higher density
-total_bars_width = screen.get_width() - 100
+# Designed for 1920x1080: every size scales with the screen height, so the layout
+# keeps its proportions on another screen (and with render_scale).
+UI_SCALE = screen.get_height() / 1080.0
+
+
+def px(value):
+    """A 1080p size in pixels, scaled to this screen (never below 1)."""
+    return max(1, int(round(value * UI_SCALE)))
+
+
+analyzer_height = screen.get_height() // 2 + px(80)
+analyzer_y_bottom = screen.get_height() - px(150)
+bar_spacing = px(3)  # Tighter spacing for higher density
+total_bars_width = screen.get_width() - px(100)
+MARGIN = px(50)
 bar_width = max(1, (total_bars_width // NUM_BANDS) - bar_spacing)
 start_x = (screen.get_width() - (NUM_BANDS * (bar_width + bar_spacing))) // 2
 curve_x = [start_x + i * (bar_width + bar_spacing) + (bar_width // 2) for i in range(NUM_BANDS)]
@@ -378,9 +430,9 @@ BAR_ALPHA = 140 / 255.0
 PEAK_BAR_COLOR = (234, 234, 234)  # White at alpha 230 over the glow
 GLOW_COLOR = (40, 40, 40)  # White at alpha 40 over black
 
-font_extra_large = pygame.font.Font(None, 220)
-font_medium = pygame.font.Font(None, 80)
-font_tiny = pygame.font.Font(None, 25)
+font_extra_large = pygame.font.Font(None, px(220))
+font_medium = pygame.font.Font(None, px(80))
+font_tiny = pygame.font.Font(None, px(25))
 
 _text_cache = {}
 
@@ -415,10 +467,10 @@ def build_static_layer():
             label_x = _freq_to_x(f)
             label_text = f"{int(f / 1000)}k" if f >= 1000 else f"{f}"
             label_surface = font_tiny.render(label_text, True, (130, 150, 130))
-            layer.blit(label_surface, label_surface.get_rect(midtop=(label_x, analyzer_y_bottom + 15)))
+            layer.blit(label_surface, label_surface.get_rect(midtop=(label_x, analyzer_y_bottom + px(15))))
             pygame.draw.line(
                 layer, (60, 80, 60),
-                (label_x, analyzer_y_bottom + 2), (label_x, analyzer_y_bottom + 10), 1,
+                (label_x, analyzer_y_bottom + px(2)), (label_x, analyzer_y_bottom + px(10)), 1,
             )
 
     # Multi-level range labels
@@ -426,21 +478,36 @@ def build_static_layer():
         if rng["max"] >= MIN_FREQ and rng["min"] <= MAX_FREQ:
             x_start = _freq_to_x(max(rng["min"], MIN_FREQ))
             x_end = _freq_to_x(min(rng["max"], MAX_FREQ))
-            level_y = analyzer_y_bottom + 50 + (rng["level"] * 40)
+            level_y = analyzer_y_bottom + px(50) + (rng["level"] * px(40))
             line_color = rng["color"]
-            pygame.draw.line(layer, line_color, (x_start + 2, level_y), (x_end - 2, level_y), 2)
-            pygame.draw.line(layer, line_color, (x_start + 2, level_y - 5), (x_start + 2, level_y + 5), 1)
-            pygame.draw.line(layer, line_color, (x_end - 2, level_y - 5), (x_end - 2, level_y + 5), 1)
+            pygame.draw.line(layer, line_color, (x_start + 2, level_y), (x_end - 2, level_y), px(2))
+            pygame.draw.line(layer, line_color, (x_start + 2, level_y - px(5)), (x_start + 2, level_y + px(5)), 1)
+            pygame.draw.line(layer, line_color, (x_end - 2, level_y - px(5)), (x_end - 2, level_y + px(5)), 1)
             range_surface = font_tiny.render(rng["name"], True, line_color)
-            range_rect = range_surface.get_rect(center=((x_start + x_end) // 2, level_y + 15))
+            range_rect = range_surface.get_rect(center=((x_start + x_end) // 2, level_y + px(15)))
             # Only draw if there is space
             if x_end - x_start > range_rect.width:
                 layer.blit(range_surface, range_rect)
     return layer
 
 
+def build_no_mic_icon():
+    """Stylized "No Mic" icon (drawn at 100x100, scaled to the screen)."""
+    icon = pygame.Surface((100, 100), pygame.SRCALPHA)
+    # Mic body (rounded rect) and stand
+    pygame.draw.rect(icon, (100, 100, 100), (35, 20, 30, 45), border_radius=15)
+    pygame.draw.line(icon, (100, 100, 100), (50, 65), (50, 80), 3)
+    pygame.draw.line(icon, (100, 100, 100), (35, 80), (65, 80), 3)
+    # The warning slash (red)
+    pygame.draw.line(icon, (255, 50, 50), (20, 20), (80, 80), 6)
+    if px(100) != 100:
+        icon = pygame.transform.smoothscale(icon, (px(100), px(100)))
+    return icon
+
+
 perf.mark("display_ready")  # PERF
 static_layer = build_static_layer()
+no_mic_icon = build_no_mic_icon()
 slope_info = f"{SLOPE_DB_PER_OCTAVE}dB SL" if SLOPE_DB_PER_OCTAVE != 0 else "RAW"
 badge_surface = font_tiny.render(f"FAST RESPONSE | SLOPE: {slope_info}", True, (110, 135, 110))
 
@@ -485,10 +552,10 @@ def open_stream():
             last_open_error = str(e)
         return None
 
-    print(f"Opening stream: {CHANNELS} channel(s), {SAMPLE_RATE}Hz, index {index}, "
-          f"using channel {MIC_CHANNEL if CHANNELS > 1 else 0}")
+    print(f"Opening stream: {CHANNELS} channel(s), {SAMPLE_RATE}Hz, {CAPTURE_BITS}-bit, "
+          f"index {index}, using channel {MIC_CHANNEL if CHANNELS > 1 else 0}")
     last_open_error = None
-    meter = dsp.LevelMeter(SAMPLE_RATE, CALIBRATION_OFFSET, NOISE_FLOOR)
+    meter = dsp.LevelMeter(SAMPLE_RATE, **METER_SETTINGS)
     build_rate_tables(SAMPLE_RATE)
     audio_buffer[:] = 0
     return new_stream
@@ -574,6 +641,7 @@ while running:
     if stream is None and now - last_open_attempt >= OPEN_RETRY_S:
         last_open_attempt = now
         stream = open_stream()
+        perf.mark("mic_open_tried")  # PERF
         if stream is not None:
             last_level_send = now
 
@@ -582,7 +650,7 @@ while running:
         try:
             # Blocks until CHUNK_READ frames are there: this paces the loop (~31 Hz)
             raw_data = stream.read(CHUNK_READ, exception_on_overflow=False)
-            new_data = dsp.pick_channel(raw_data, CHANNELS, MIC_CHANNEL)
+            new_data = dsp.pick_channel(raw_data, CHANNELS, MIC_CHANNEL, CAPTURE_BITS)
         except Exception as e:
             # Don't quit (the watchdog would blank the screen): reopen the mic instead.
             print(f"Audio read error: {e}. Reopening the microphone...")
@@ -599,8 +667,8 @@ while running:
         screen.fill((0, 0, 0))
 
     perf.frames.lap("clear")  # PERF
-    # --- UPDATE CPU STATS (1Hz) ---
-    if now - last_stats_update >= 1.0:
+    # --- UPDATE CPU STATS (1Hz, only when shown: audio.show_debug) ---
+    if SHOW_DEBUG and now - last_stats_update >= 1.0:
         curr_temp, curr_total, curr_idle = get_cpu_stats()
         if last_cpu_total > 0:
             diff_total = curr_total - last_cpu_total
@@ -613,12 +681,13 @@ while running:
         cpu_temp = curr_temp
         last_stats_update = now
 
-    # Render minimalist CPU stats (top-left, discreet)
-    stats_color = (110, 130, 110)  # Subtle technical green
-    if cpu_temp > 75:
-        stats_color = (220, 80, 80)  # Warning red for high temp
-    stats_text = f"CPU {int(cpu_usage)}%  |  {cpu_temp:.1f}°C"
-    screen.blit(render_text(font_tiny, stats_text, stats_color), (50, 50))
+    if SHOW_DEBUG:
+        # Render minimalist CPU stats (top-left, discreet)
+        stats_color = (110, 130, 110)  # Subtle technical green
+        if cpu_temp > 75:
+            stats_color = (220, 80, 80)  # Warning red for high temp
+        stats_text = f"CPU {int(cpu_usage)}%  |  {cpu_temp:.1f}°C"
+        screen.blit(render_text(font_tiny, stats_text, stats_color), (MARGIN, MARGIN))
 
     if new_data is not None:
         # --- SOUND LEVEL (shared DSP, same math as the orchestrator) ---
@@ -649,64 +718,47 @@ while running:
             # DC/VLF Removal + Nyquist cleanup (pre-computed masks)
             fft_complex[_vlf_mask] = 0
             fft_complex[_nyquist_mask] = 0
-            fft_mag = np.abs(fft_complex)
-
-            for i, indices in enumerate(band_indices):
-                # Get average magnitude for this band
-                mag = np.mean(fft_mag[indices])
-                # 1. Base dB
-                db_val = 20 * np.log10(max(1e-9, mag)) + CALIBRATION_OFFSET
-                # 2. Add visual tilt
-                db_val += visual_tilt[i]
-                # 3. Add HF Boost for air frequencies (>10kHz)
-                if band_centers[i] > 10000:
-                    db_val += HIGH_FREQ_BOOST
-                # Normalize to the MIN_DB..MAX_DB window
-                norm_val = (db_val - MIN_DB) / (MAX_DB - MIN_DB)
-                current_bar_targets[i] = np.clip(norm_val, 0, 1)
+            power = fft_complex.real**2 + fft_complex.imag**2
+            # Mean power of each band (cumulative sum: bands may share a bin)
+            cumulative = np.concatenate(([0.0], np.cumsum(power)))
+            band_power = (cumulative[band_stops] - cumulative[band_starts]) / band_counts
+            # Band level in dB (RMS of its bins). No calibration offset: the bars are
+            # a visual on their own MIN_DB..MAX_DB scale, they must not move when
+            # the dBA number is calibrated.
+            db_vals = (10 * np.log10(np.maximum(band_power, 1e-18))
+                       + band_db_adjust + band_db_shaping)
+            np.clip((db_vals - MIN_DB) / (MAX_DB - MIN_DB), 0, 1, out=current_bar_targets)
         frame_count += 1
 
-        # Apply visual smoothing (fast rise, slow decay)
-        max_energy_idx = -1
-        max_energy_val = -1
+        # Visual smoothing: fast rise, exponential decay
+        rising = current_bar_targets > bar_heights
+        bar_heights[:] = np.where(
+            rising,
+            bar_heights + RISE_SMOOTHING * (current_bar_targets - bar_heights),
+            bar_heights * SMOOTHING_FACTOR,
+        )
+        # Dynamic Noise Gate (pre-computed, compensates for tilt + HF boost)
+        bar_heights[bar_heights < noise_gate_thresholds] = 0
 
-        for i in range(NUM_BANDS):
-            if current_bar_targets[i] > bar_heights[i]:
-                # Interpolated smoothing for the rise
-                bar_heights[i] = bar_heights[i] + RISE_SMOOTHING * (
-                    current_bar_targets[i] - bar_heights[i]
-                )
-            else:
-                bar_heights[i] *= SMOOTHING_FACTOR  # Exponential decay
+        # Dominant frequency (peak highlight): the highest bar above 0.15
+        candidates = np.where(bar_heights > 0.15, bar_heights, -1.0)
+        max_energy_idx = int(np.argmax(candidates))
+        if candidates[max_energy_idx] < 0:
+            max_energy_idx = -1
 
-            # Dynamic Noise Gate (pre-computed, compensates for tilt + HF boost)
-            if bar_heights[i] < noise_gate_thresholds[i]:
-                bar_heights[i] = 0
-
-            # Identify dominant frequency (Peak highlight)
-            if bar_heights[i] > max_energy_val and bar_heights[i] > 0.15:
-                max_energy_val = bar_heights[i]
-                max_energy_idx = i
-
-            # Professional Unity-style peak handling (Gravity based)
-            if bar_heights[i] > peak_pos[i]:
-                peak_pos[i] = bar_heights[i]
-                peak_vel[i] = 0
-            else:
-                peak_vel[i] = min(PEAK_MAX_SPEED, peak_vel[i] + PEAK_GRAVITY)
-                peak_pos[i] -= peak_vel[i]
-                if peak_pos[i] < bar_heights[i]:
-                    peak_pos[i] = bar_heights[i]
-                    peak_vel[i] = 0
+        # Professional Unity-style peak handling (Gravity based)
+        pushed = bar_heights > peak_pos
+        peak_vel[:] = np.where(pushed, 0.0, np.minimum(PEAK_MAX_SPEED, peak_vel + PEAK_GRAVITY))
+        peak_pos[:] = np.where(pushed, bar_heights, peak_pos - peak_vel)
+        landed = peak_pos < bar_heights
+        peak_pos[landed] = bar_heights[landed]
+        peak_vel[landed] = 0.0
 
         # --- CURVE CALCULATION ---
         # A second, even smoother buffer for the "Professional Curve"
-        curve_points = []
-        for i in range(NUM_BANDS):
-            curve_heights[i] = curve_heights[i] * CURVE_SMOOTHING + bar_heights[
-                i
-            ] * (1 - CURVE_SMOOTHING)
-            curve_points.append((curve_x[i], analyzer_y_bottom - curve_heights[i] * analyzer_height))
+        curve_heights[:] = curve_heights * CURVE_SMOOTHING + bar_heights * (1 - CURVE_SMOOTHING)
+        curve_y = analyzer_y_bottom - curve_heights * analyzer_height
+        curve_points = list(zip(curve_x, curve_y.tolist()))
 
         # --- DRAWING PASS (all opaque, straight onto the screen) ---
 
@@ -717,8 +769,8 @@ while running:
             x = start_x + max_energy_idx * (bar_width + bar_spacing)
             pygame.draw.rect(
                 screen, GLOW_COLOR,
-                (x - 4, analyzer_y_bottom - h - 10, bar_width + 8, h + 10),
-                border_radius=8,
+                (x - px(4), analyzer_y_bottom - h - px(10), bar_width + px(8), h + px(10)),
+                border_radius=px(8),
             )
 
         # 2. Bars, then the sharp peak indicators above them
@@ -728,7 +780,7 @@ while running:
             x = start_x + i * (bar_width + bar_spacing)
             is_peak = i == max_energy_idx
 
-            if h > 4:
+            if h > px(4):
                 if is_peak:
                     color = PEAK_BAR_COLOR
                 else:
@@ -737,15 +789,15 @@ while running:
                     c = band_colors[i]
                     color = (int(c[0] * k), int(c[1] * k), int(c[2] * k))
                 pygame.draw.rect(
-                    screen, color, (x, analyzer_y_bottom - h, bar_width, h), border_radius=4
+                    screen, color, (x, analyzer_y_bottom - h, bar_width, h), border_radius=px(4)
                 )
 
             # Skip the indicator for the dominant peak bar
-            if not is_peak and ph > 5:
+            if not is_peak and ph > px(5):
                 pygame.draw.rect(
                     screen,
                     (255, 255, 255),
-                    (x, analyzer_y_bottom - ph - 3, bar_width, 2),
+                    (x, analyzer_y_bottom - ph - px(3), bar_width, px(2)),
                     border_radius=1,
                 )
 
@@ -770,33 +822,23 @@ while running:
         # Render dBA text (Large, Integer only) — cached until the value changes
         dba_text = render_text(font_extra_large, f"{int(round(last_displayed_dba))} dBA", text_color)
         dba_rect = dba_text.get_rect()
-        dba_rect.topright = (screen.get_width() - 50, 50)
+        dba_rect.topright = (screen.get_width() - MARGIN, MARGIN)
         screen.blit(dba_text, dba_rect)
 
         # Render dBZ text (Medium)
         dbz_text = render_text(font_medium, f"{last_displayed_dbz:.1f} dBZ", (180, 210, 180))
         dbz_rect = dbz_text.get_rect()
-        dbz_rect.topright = (screen.get_width() - 50, dba_rect.bottom + 10)
+        dbz_rect.topright = (screen.get_width() - MARGIN, dba_rect.bottom + px(10))
         screen.blit(dbz_text, dbz_rect)
 
-        # "FAST RESPONSE" indicator (Tiny status info, pre-rendered)
-        badge_rect = badge_surface.get_rect()
-        badge_rect.topright = (screen.get_width() - 50, dbz_rect.bottom + 10)
-        screen.blit(badge_surface, badge_rect)
+        if SHOW_DEBUG:
+            # "FAST RESPONSE" indicator (Tiny status info, pre-rendered)
+            badge_rect = badge_surface.get_rect()
+            badge_rect.topright = (screen.get_width() - MARGIN, dbz_rect.bottom + px(10))
+            screen.blit(badge_surface, badge_rect)
     else:
-        # 1. Draw a stylized "No Mic" icon in the top-left corner
-        icon_surface = pygame.Surface((100, 100), pygame.SRCALPHA)
-        # Draw Mic Body (Rounded Rect)
-        pygame.draw.rect(
-            icon_surface, (100, 100, 100), (35, 20, 30, 45), border_radius=15
-        )
-        # Draw Mic Stand
-        pygame.draw.line(icon_surface, (100, 100, 100), (50, 65), (50, 80), 3)
-        pygame.draw.line(icon_surface, (100, 100, 100), (35, 80), (65, 80), 3)
-        # Draw the Warning Slash (Red)
-        pygame.draw.line(icon_surface, (255, 50, 50), (20, 20), (80, 80), 6)
-
-        screen.blit(icon_surface, (50, 50))
+        # 1. The "No Mic" icon in the top-left corner
+        screen.blit(no_mic_icon, (MARGIN, MARGIN))
 
         # 2. Render localized error message
         error_text = render_text(

@@ -3,9 +3,12 @@
 Both paths feed the same Home Assistant sensor, so every number that leaves the
 frame is computed here, the same way. Only depends on numpy.
 
-Scale: levels are in dB relative to 1 LSB RMS of int16 samples, plus
-`calibration_offset_db` (single-point calibration). It is a relative dBA, accurate
-near the calibration level, not a certified SPL meter.
+Scale: levels are in dB relative to 1 LSB RMS of int16 samples (32-bit captures are
+scaled down to the same scale), plus `calibration_offset_db`. With the optional
+`calibration_slope` (2-point calibration) the scale also turns around
+CALIBRATION_REF_DBA. It is a relative dBA, accurate near the calibration points,
+not a certified SPL meter: the mic's own response, the ALSA chain and a single
+phone-app reference all limit the accuracy (a few dB).
 """
 
 import math
@@ -19,6 +22,30 @@ FRAME_SIZE = 2048  # Samples per analysis frame (43 ms at 48 kHz); hop is half o
 # Readings far below the configured floor are indicative only.
 MAX_FLOOR_REDUCTION_DB = 10.0
 _MIN_POWER = 1e-12
+
+# INMP441 datasheet: -26 dBFS for 94 dB SPL (1 kHz). A -26 dBFS sine in int16 has an
+# RMS of ~1160 LSB = 61.3 dB on this scale, so the theoretical offset is ~94 - 61 = 33.
+# Fine-tune it with a sound level meter or a phone app (see README).
+DEFAULT_CALIBRATION_OFFSET_DB = 33.0
+# The 2-point slope turns the scale around this level: calibrate the offset near it.
+CALIBRATION_REF_DBA = 65.0
+
+
+def meter_settings(audio_config):
+    """LevelMeter keyword arguments from the `audio:` section of config.yaml."""
+    audio_config = audio_config or {}
+    offset = audio_config.get("calibration_offset_db")
+    slope = audio_config.get("calibration_slope")
+    return {
+        "calibration_offset_db": DEFAULT_CALIBRATION_OFFSET_DB if offset is None else float(offset),
+        "noise_floor_dba": audio_config.get("noise_floor_dba"),
+        "calibration_slope": 1.0 if slope is None else float(slope),
+    }
+
+
+def capture_bits(audio_config):
+    """audio.capture_bits: 32 keeps the mic's full 24-bit resolution, 16 by default."""
+    return 32 if str((audio_config or {}).get("capture_bits", 16)).strip() == "32" else 16
 
 
 def a_weighting_gains(rate, n):
@@ -56,16 +83,21 @@ def channel_index(name):
     return 1 if str(name).strip().lower() in ("right", "r", "1") else 0
 
 
-def pick_channel(raw, channels, channel=0):
-    """int16 interleaved bytes -> float64 mono samples of one channel.
+def pick_channel(raw, channels, channel=0, bits=16):
+    """Interleaved int16 (or int32) bytes -> float64 mono samples of one channel.
 
     The INMP441 only sends audio in one I2S slot (left when L/R is tied to GND).
     Averaging both slots would mix in a silent channel and lose 6 dB.
+    32-bit samples are divided by 65536: same scale as int16 (so the same
+    calibration), with the extra low bits kept as decimals.
     """
-    data = np.frombuffer(raw, dtype=np.int16)
+    data = np.frombuffer(raw, dtype=np.int32 if bits == 32 else np.int16)
     if channels > 1:
         data = data[min(channel, channels - 1) :: channels]
-    return data.astype(np.float64)
+    data = data.astype(np.float64)
+    if bits == 32:
+        data /= 65536.0
+    return data
 
 
 class LevelMeter:
@@ -85,11 +117,12 @@ class LevelMeter:
     """
 
     def __init__(self, rate, calibration_offset_db=0.0, noise_floor_dba=None,
-                 frame_size=FRAME_SIZE):
+                 frame_size=FRAME_SIZE, calibration_slope=1.0):
         self.rate = int(rate)
         self.n = int(frame_size)
         self.hop = self.n // 2
         self.offset = float(calibration_offset_db or 0.0)
+        self.slope = float(calibration_slope or 1.0)
         self.window = np.sin(np.pi * (np.arange(self.n) + 0.5) / self.n)
 
         # Parseval: sum(x^2) = (1/N) * sum over all bins |X|^2. rfft keeps half the
@@ -110,7 +143,7 @@ class LevelMeter:
 
         self._floor_power = None
         if noise_floor_dba is not None:
-            self._floor_power = 10 ** ((float(noise_floor_dba) - self.offset) / 10.0)
+            self._floor_power = 10 ** (self._uncalibrate(float(noise_floor_dba)) / 10.0)
 
         self._pending = np.zeros(0)
         self._fast_a = None
@@ -147,11 +180,24 @@ class LevelMeter:
         self._count += 1
         self._max_fast_a = max(self._max_fast_a, self._fast_a)
 
+    def _calibrate(self, db):
+        """Raw dB -> calibrated dB: offset, then the optional 2-point slope."""
+        db += self.offset
+        if self.slope != 1.0:
+            db = CALIBRATION_REF_DBA + self.slope * (db - CALIBRATION_REF_DBA)
+        return db
+
+    def _uncalibrate(self, db):
+        """Calibrated dB -> raw dB (inverse of _calibrate)."""
+        if self.slope != 1.0:
+            db = CALIBRATION_REF_DBA + (db - CALIBRATION_REF_DBA) / self.slope
+        return db - self.offset
+
     def _db_a(self, power):
         if self._floor_power is not None:
             power = max(power - self._floor_power,
                         power * 10 ** (-MAX_FLOOR_REDUCTION_DB / 10.0))
-        return power_to_db(power, self.offset)
+        return self._calibrate(power_to_db(power))
 
     def laf(self):
         """Current FAST A-weighted level in dBA, or None before the first frame."""
@@ -159,7 +205,7 @@ class LevelMeter:
 
     def reactive(self):
         """(dBA, dBZ) with instant attack and quick release, for the screen only."""
-        return self._db_a(self._react_a), power_to_db(self._react_z, self.offset)
+        return self._db_a(self._react_a), self._calibrate(power_to_db(self._react_z))
 
     def pop_interval(self):
         """(LAeq, LAFmax) in dBA since the previous call, or None if no frame was seen."""

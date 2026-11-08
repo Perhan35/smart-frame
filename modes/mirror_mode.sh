@@ -12,8 +12,12 @@ CONFIG_FILE="$DIR/../config.yaml"
 
 if [ -z "$MIRROR_URL" ]; then
     if [ -f "$CONFIG_FILE" ]; then
-        # Fast shell-based fallback for simple YAML (avoids 1.5s python overhead on Pi Zero 2)
-        MIRROR_URL=$(grep 'url:' "$CONFIG_FILE" | head -n 1 | awk '{print $2}' | tr -d '"'\'' ')
+        # Fast shell-based fallback for simple YAML (avoids 1.5s python overhead on Pi Zero 2):
+        # the first "url:" inside the magic_mirror: section only.
+        MIRROR_URL=$(awk '
+            /^[^[:space:]#]/ { in_section = ($0 ~ /^magic_mirror:/) }
+            in_section && $1 == "url:" { print $2; exit }
+        ' "$CONFIG_FILE" | tr -d '"'\'' ')
     fi
 fi
 
@@ -60,8 +64,16 @@ if [ "$BROWSER_TYPE" = "cog" ]; then
     # Wayland fullscreen kiosk — set initial size to match display to avoid
     # EGL buffer mismatch on first frame (default 1024x768 gets discarded)
     export COG_PLATFORM_WL_VIEW_FULLSCREEN=1
-    export COG_PLATFORM_WL_VIEW_WIDTH=1920
-    export COG_PLATFORM_WL_VIEW_HEIGHT=1080
+    # Size from config.yaml (screen_size, passed by main.py), 1920x1080 by default
+    SCREEN_SIZE="${SMARTFRAME_SCREEN_SIZE:-1920x1080}"
+    if [[ "$SCREEN_SIZE" =~ ^([0-9]+)x([0-9]+)$ ]]; then
+        export COG_PLATFORM_WL_VIEW_WIDTH="${BASH_REMATCH[1]}"
+        export COG_PLATFORM_WL_VIEW_HEIGHT="${BASH_REMATCH[2]}"
+    else
+        echo "Warning: invalid screen_size '$SCREEN_SIZE' (expected e.g. 1920x1080). Using 1920x1080."
+        export COG_PLATFORM_WL_VIEW_WIDTH=1920
+        export COG_PLATFORM_WL_VIEW_HEIGHT=1080
+    fi
 
     # Pi Zero 2 rendering optimisation:
     # vc4 GPU supports GLES 2.0 which WPE WebKit can use (unlike Chromium ANGLE which needs 3.0).
@@ -132,11 +144,10 @@ elif [ "$BROWSER_TYPE" = "chromium" ]; then
 --disable-gpu --disable-gpu-compositing \
 --num-raster-threads=2 --renderer-process-limit=1 \
 --disable-session-crashed-bubble --hide-crash-restore-bubble \
---user-data-dir=$PROFILE_DIR \
 --memory-pressure-thresholds=1,2 \
 --disable-smooth-scrolling --mute-audio --force-device-scale-factor=1 \
 --disable-background-timer-throttling \
---disk-cache-dir=$CACHE_DIR --disk-cache-size=52428800 --media-cache-size=10485760 \
+--disk-cache-size=52428800 --media-cache-size=10485760 \
 --disable-policy-cloud-management --no-proxy-server --disable-vulkan"
 
     echo "Pi Zero 2 mode: GPU disabled (vc4 GLES 2.0 incompatible with Chromium ANGLE). Using CPU rendering."
@@ -149,6 +160,8 @@ elif [ "$BROWSER_TYPE" = "chromium" ]; then
     LAUNCH_WRAPPER="nice -n 0 ionice -c 2 -n 4"
     # Build the command as an array so --js-flags keeps its space-separated value intact
     read -ra FULL_CMD <<< "$LAUNCH_WRAPPER $BROWSER_CMD $CHROME_FLAGS"
+    # Paths go in as separate elements, so a folder name with spaces stays one argument
+    FULL_CMD+=("--user-data-dir=$PROFILE_DIR" "--disk-cache-dir=$CACHE_DIR")
     FULL_CMD+=("--js-flags=--max-old-space-size=128 --stack-size=1024")
 fi
 
@@ -187,8 +200,9 @@ if [ -n "$WAYLAND_DISPLAY" ]; then
                     ydotool key 28:1 28:0 2>/dev/null
                 fi
             }
-            # Try at 8s, 12s, 16s (browser takes ~10-20s to show the dialog on Pi Zero 2)
-            for delay in 8 12 16 20; do
+            # Try at 8, 12, 16 and 20 s after launch (the browser takes ~10-20 s to show
+            # the dialog on Pi Zero 2): wait 8 s, then 4 s between tries.
+            for delay in 8 4 4 4; do
                 sleep "$delay" &
                 wait $!
                 _dismiss_dialog
@@ -212,7 +226,8 @@ elif [ -n "$DISPLAY" ]; then
     # Auto-dismiss for Chromium on X11
     if [ "$BROWSER_TYPE" = "chromium" ]; then
         (
-            for delay in 8 12 16 20; do
+            # At 8, 12, 16 and 20 s after launch (see the Wayland branch above)
+            for delay in 8 4 4 4; do
                 sleep "$delay" &
                 wait $!
                 if command -v xdotool &>/dev/null; then

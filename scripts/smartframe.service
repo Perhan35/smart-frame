@@ -14,5 +14,26 @@ ExecStart={{WORKING_DIRECTORY}}/.venv/bin/python3 main.py
 Restart=on-failure
 RestartSec=10
 
+# --- Hardening ---
+# The service needs no root rights at runtime (scripts/setup_hardware_access.sh gives
+# it access to I2C and the framebuffer), so it may never gain new privileges (sudo,
+# setuid) and cannot change the system files.
+NoNewPrivileges=yes
+ProtectSystem=full
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+LockPersonality=yes
+RestrictSUIDSGID=yes
+SystemCallArchitectures=native
+UMask=0077
+# Not enabled on purpose (they break this service):
+#   PrivateDevices          hides /dev/dri (display), /dev/i2c-* (DDC/CI) and /dev/snd (mic)
+#   PrivateTmp              hides /tmp/.X11-unix (X11 fallback)
+#   ProtectHome             the project, browser profiles and caches live in the home folder
+#   ProtectKernelTunables   makes /sys read-only (screen-off fallback writes fb0/blank)
+#   MemoryDenyWriteExecute  breaks the browser's JavaScript engine
+#   RestrictNamespaces      breaks the browser sandbox
+
 [Install]
 WantedBy=multi-user.target
