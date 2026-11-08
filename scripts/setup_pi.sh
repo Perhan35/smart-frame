@@ -55,6 +55,9 @@ else
     echo "config.yaml already exists, skipping."
 fi
 
+# Hardware access without sudo at runtime (i2c-dev, framebuffer) + config.yaml permissions
+"$DIR/setup_hardware_access.sh"
+
 echo ""
 echo "== Audio Input Configuration =="
 echo "SmartFrame can automatically discover your I2S microphone during its first run."

@@ -7,6 +7,7 @@ import yaml
 import ctypes
 import signal
 import time
+import atexit
 from contextlib import contextmanager
 
 # Load configuration
@@ -29,6 +30,22 @@ try:
             DEVICE_INDEX = audio_config.get("device_index")
 except Exception:
     pass
+
+# IPC bridge read by the orchestrator (path set by main.py).
+BRIDGE_FILE = os.environ.get("SMARTFRAME_DBA_FILE", "/tmp/smartframe_dba")
+
+
+def _remove_bridge_file():
+    """Delete the bridge on exit so the orchestrator never reads a stale dBA value."""
+    try:
+        os.remove(BRIDGE_FILE)
+    except OSError:
+        pass
+
+
+# Runs on normal exit, SIGTERM (handled below) and uncaught errors. A SIGKILL skips
+# it, so the orchestrator also removes the file after stopping this process.
+atexit.register(_remove_bridge_file)
 
 DEVICE_INDEX_ENV = os.environ.get("SMARTFRAME_AUDIO_DEVICE")
 if DEVICE_INDEX_ENV and DEVICE_INDEX_ENV != "None" and DEVICE_INDEX_ENV != "":
@@ -599,7 +616,7 @@ while running:
             # while audio_mode holds the microphone.
             if current_time - last_bridge_update >= 1.0:
                 try:
-                    with open("/tmp/smartframe_dba", "w") as f:
+                    with open(BRIDGE_FILE, "w") as f:
                         f.write(f"{last_displayed_dba:.1f}")
                     last_bridge_update = current_time
                 except Exception:

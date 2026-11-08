@@ -1,8 +1,10 @@
 mqtt:
   broker: "[MQTT_SERVER_IP_ADDRESS]" # Replace with your MQTT broker IP (e.g., Home Assistant)
-  port: 1883
-  username: "[MQTT_USERNAME]"
+  port: 1883 # Usually 8883 when tls is true
+  username: "[MQTT_USERNAME]" # Strongly recommended: without credentials, anyone on the network can control the frame
   password: "[MQTT_PASSWORD]"
+  tls: false # Set to true if your broker accepts TLS connections (encrypts the password and commands)
+  ca_cert: "" # Path to the broker's CA certificate (empty = system certificates)
   topic: "smartframe/set_mode"
   state_topic: "smartframe/mode_state"
   status_topic: "smartframe/status"

@@ -1,5 +1,5 @@
 #!/bin/sh
-# Runs after every `git pull` / `git merge` to sync new config keys.
+# Runs after every `git pull` / `git merge`.
 
 REPO_ROOT="$(git rev-parse --show-toplevel)"
 
@@ -10,10 +10,24 @@ else
     PYTHON="python3"
 fi
 
-# Only run if config.example.yaml was modified by the merge.
+# 1. Sync new config keys, only if config.example.yaml was modified by the merge.
 if git diff-tree -r --name-only --no-commit-id ORIG_HEAD HEAD 2>/dev/null | grep -q "config.example.yaml"; then
     echo "[post-merge] config.example.yaml changed — updating config.yaml..."
     "$PYTHON" "$REPO_ROOT/scripts/update_config.py"
 else
     echo "[post-merge] config.example.yaml unchanged, skipping config update."
+fi
+
+# 2. Apply missing system settings (uses sudo only if something is missing).
+if [ -x "$REPO_ROOT/scripts/setup_hardware_access.sh" ]; then
+    "$REPO_ROOT/scripts/setup_hardware_access.sh" || echo "[post-merge] Warning: hardware access setup failed."
+fi
+
+# 3. Keep this hook up to date with the version in the repository.
+#    (mv is atomic: the shell running this file keeps reading the old copy)
+HOOK_SRC="$REPO_ROOT/scripts/post-merge.hook"
+HOOK_DST="$(git rev-parse --git-path hooks/post-merge)"
+if [ -f "$HOOK_SRC" ] && ! cmp -s "$HOOK_SRC" "$HOOK_DST"; then
+    cp "$HOOK_SRC" "$HOOK_DST.new" && chmod +x "$HOOK_DST.new" && mv "$HOOK_DST.new" "$HOOK_DST"
+    echo "[post-merge] Git hook updated."
 fi

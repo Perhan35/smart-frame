@@ -1,0 +1,6 @@
+target-version = "py311"
+extend-exclude = [".venv"]
+
+[lint]
+# Real bugs only: pyflakes (F) + syntax/indent errors (E9)
+select = ["E9", "F"]

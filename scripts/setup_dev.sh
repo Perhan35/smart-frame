@@ -29,13 +29,17 @@ echo "Installing Python dependencies..."
 source .venv/bin/activate
 pip install --upgrade pip --quiet
 pip install -r requirements.txt
+pip install -r requirements-dev.txt
 
 # Install post-merge git hook
 echo "Installing git post-merge hook..."
 HOOK_PATH="$(git rev-parse --git-dir)/hooks/post-merge"
 cp "$DIR/post-merge.hook" "$HOOK_PATH"
 chmod +x "$HOOK_PATH"
-echo "Git hook installed."
+PRE_COMMIT_PATH="$(git rev-parse --git-dir)/hooks/pre-commit"
+cp "$DIR/pre-commit.hook" "$PRE_COMMIT_PATH"
+chmod +x "$PRE_COMMIT_PATH"
+echo "Git hooks installed (post-merge, pre-commit)."
 
 echo ""
 echo "=== Setup complete ==="

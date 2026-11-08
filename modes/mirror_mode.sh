@@ -90,7 +90,7 @@ if [ "$BROWSER_TYPE" = "cog" ]; then
     fi
 
     LAUNCH_WRAPPER="nice -n 0 ionice -c 2 -n 4"
-    FULL_CMD="$LAUNCH_WRAPPER $BROWSER_CMD $COG_FLAGS"
+    read -ra FULL_CMD <<< "$LAUNCH_WRAPPER $BROWSER_CMD $COG_FLAGS"
 
 # ──────────────────────────────────────────────
 #  Chromium — fallback browser
@@ -131,7 +131,7 @@ elif [ "$BROWSER_TYPE" = "chromium" ]; then
 --disable-session-crashed-bubble --hide-crash-restore-bubble \
 --ignore-certificate-errors --allow-running-insecure-content --remote-allow-origins=* \
 --user-data-dir=$PROFILE_DIR \
---memory-pressure-thresholds=1,2 --js-flags='--max-old-space-size=128 --stack-size=1024' \
+--memory-pressure-thresholds=1,2 \
 --disable-smooth-scrolling --mute-audio --force-device-scale-factor=1 \
 --disable-background-timer-throttling \
 --disk-cache-dir=$CACHE_DIR --disk-cache-size=52428800 --media-cache-size=10485760 \
@@ -145,7 +145,9 @@ elif [ "$BROWSER_TYPE" = "chromium" ]; then
     fi
 
     LAUNCH_WRAPPER="nice -n 0 ionice -c 2 -n 4"
-    FULL_CMD="$LAUNCH_WRAPPER $BROWSER_CMD $CHROME_FLAGS"
+    # Build the command as an array so --js-flags keeps its space-separated value intact
+    read -ra FULL_CMD <<< "$LAUNCH_WRAPPER $BROWSER_CMD $CHROME_FLAGS"
+    FULL_CMD+=("--js-flags=--max-old-space-size=128 --stack-size=1024")
 fi
 
 # Run unclutter in the background as a fallback for X11/XWayland cursors
@@ -164,9 +166,9 @@ fi
 if [ -n "$WAYLAND_DISPLAY" ]; then
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] Using Wayland display: $WAYLAND_DISPLAY"
     if [ "$SMARTFRAME_DEBUG" = "1" ]; then
-        $FULL_CMD "$MIRROR_URL" &
+        "${FULL_CMD[@]}" "$MIRROR_URL" &
     else
-        $FULL_CMD "$MIRROR_URL" &> /dev/null &
+        "${FULL_CMD[@]}" "$MIRROR_URL" &> /dev/null &
     fi
     PID=$!
 
@@ -200,9 +202,9 @@ if [ -n "$WAYLAND_DISPLAY" ]; then
 elif [ -n "$DISPLAY" ]; then
     echo "Using X11 display: $DISPLAY"
     if [ "$SMARTFRAME_DEBUG" = "1" ]; then
-        $FULL_CMD "$MIRROR_URL" &
+        "${FULL_CMD[@]}" "$MIRROR_URL" &
     else
-        $FULL_CMD "$MIRROR_URL" &> /dev/null &
+        "${FULL_CMD[@]}" "$MIRROR_URL" &> /dev/null &
     fi
     PID=$!
     # Auto-dismiss for Chromium on X11

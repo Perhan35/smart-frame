@@ -1,0 +1,3 @@
+#!/bin/sh
+# Blocks the commit if code checks fail. Bypass (not recommended): git commit --no-verify
+exec "$(git rev-parse --show-toplevel)/scripts/lint.sh"

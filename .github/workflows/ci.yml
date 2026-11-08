@@ -1,0 +1,29 @@
+name: CI
+
+# Kept minimal to save GitHub Actions minutes:
+# - runs only when code files change
+# - one small job, cancelled if a newer push arrives
+on:
+  push:
+    branches: [main]
+    paths: ['**.py', '**.sh', '**.hook', 'ruff.toml', 'requirements-dev.txt', '.github/workflows/ci.yml']
+  pull_request:
+    paths: ['**.py', '**.sh', '**.hook', 'ruff.toml', 'requirements-dev.txt', '.github/workflows/ci.yml']
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install ruff  # shellcheck is preinstalled on ubuntu runners
+        run: pip install --quiet "$(grep '^ruff==' requirements-dev.txt)"
+      - name: Lint
+        run: scripts/lint.sh

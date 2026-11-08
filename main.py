@@ -38,6 +38,13 @@ if not os.path.exists(config_path):
 with open(config_path, "r") as file:
     config = yaml.safe_load(file)
 
+# config.yaml holds the MQTT password: keep it readable by its owner only.
+try:
+    if os.stat(config_path).st_mode & 0o077:
+        os.chmod(config_path, 0o600)
+except OSError:
+    pass  # Best effort (e.g. file owned by another user)
+
 # Configure logging based on debug setting
 DEBUG_MODE = config.get("debug", False)
 logging.basicConfig(
@@ -87,6 +94,8 @@ MQTT_INPUT_SOURCE_STATE_TOPIC = mqtt_config.get(
 MQTT_DBA_STATE_TOPIC = mqtt_config.get("dba_state_topic", "smartframe/audio/dba")
 MQTT_USER = mqtt_config.get("username")
 MQTT_PASS = mqtt_config.get("password")
+MQTT_TLS = bool(mqtt_config.get("tls", False))
+MQTT_CA_CERT = mqtt_config.get("ca_cert") or None
 
 MODES_DIR = os.path.join(os.path.dirname(__file__), "modes")
 
@@ -99,6 +108,23 @@ _labwc_process = None       # Persistent labwc compositor (reused across mode sw
 _labwc_wayland_display = None  # WAYLAND_DISPLAY name for the persistent labwc session
 audio_monitor_thread = None
 command_queue = queue.Queue()
+# Held by whoever changes current_mode / current_process (worker or watchdog),
+# so a mode switch and a crash recovery can never run at the same time.
+_mode_lock = threading.Lock()
+
+# File where audio_mode.py writes its dBA value for AudioMonitor (IPC bridge).
+# Passed to audio_mode.py via SMARTFRAME_DBA_FILE so both sides use the same path.
+BRIDGE_FILE = "/tmp/smartframe_dba"
+
+
+def _remove_bridge_file():
+    """Delete the dBA bridge file so a stale value is never mistaken for a live one."""
+    try:
+        os.remove(BRIDGE_FILE)
+    except FileNotFoundError:
+        pass
+    except OSError as e:
+        logging.debug(f"Could not remove bridge file {BRIDGE_FILE}: {e}")
 
 # Discovery cache to avoid repeated slow subprocess calls
 CACHE_FILE = os.path.join(os.path.dirname(__file__), ".smartframe_cache")
@@ -230,7 +256,7 @@ class AudioMonitor(threading.Thread):
         logging.info("Audio Monitor background thread started.")
         p = pyaudio.PyAudio()
         stream = None
-        bridge_file = "/tmp/smartframe_dba"
+        bridge_file = BRIDGE_FILE
         a_gains = self._get_a_weighting_gains(self.rate, self.chunk)
         ema_a = 0.0
         alpha = 1.0 - np.exp(-(self.chunk / self.rate) / 0.125)  # Fast integration
@@ -350,12 +376,7 @@ class AudioMonitor(threading.Thread):
             except:
                 pass
         p.terminate()
-        # Cleanup bridge file on exit
-        if os.path.exists(bridge_file):
-            try:
-                os.remove(bridge_file)
-            except:
-                pass
+        _remove_bridge_file()
 
 
 def _load_cache():
@@ -497,6 +518,20 @@ def _get_hdmi_output_name():
     return "HDMI-A-1"  # Fallback
 
 
+FB_BLANK_PATH = "/sys/class/graphics/fb0/blank"
+
+
+def _write_sysfs(path, value):
+    """Write a value to a sysfs file. Returns True on success."""
+    try:
+        with open(path, "w") as f:
+            f.write(value)
+        return True
+    except OSError as e:
+        logging.debug(f"Writing '{value}' to {path} failed: {e}")
+        return False
+
+
 def set_display_power(state: bool):
     """Sets display power using discovered strategies, optimizing for speed and reliability."""
     global _working_methods
@@ -521,7 +556,7 @@ def set_display_power(state: bool):
     hardware_strategies = [
         (
             "DDC/CI (Fast Off)",
-            ["sudo", "ddcutil", "setvcp", "D6", "0x01" if state else "0x04"],
+            ["ddcutil", "setvcp", "D6", "0x01" if state else "0x04"],
             lambda: True,
         ),
         (
@@ -540,17 +575,16 @@ def set_display_power(state: bool):
         ),
         (
             "FB Blanking",
-            [
-                "sudo",
-                "sh",
-                "-c",
-                f"echo {'0' if state else '1'} > /sys/class/graphics/fb0/blank",
-            ],
-            lambda: os.path.exists("/sys/class/graphics/fb0/blank"),
+            # Written directly (no sudo): setup_pi.sh installs a udev rule that makes
+            # this file writable by the 'video' group.
+            lambda: _write_sysfs(FB_BLANK_PATH, "0" if state else "1"),
+            lambda: os.access(FB_BLANK_PATH, os.W_OK),
         ),
     ]
 
     def run_strategy(name, cmd):
+        if callable(cmd):
+            return cmd()
         try:
             # Short timeout for cached methods, longer for discovery (3.5s is safe for Pi Zero I2C)
             timeout = 3.5
@@ -730,7 +764,8 @@ def set_display_input_source(source_name: str):
 
 def _run_vcp_command(vcp_code, value):
     """Helper to run a ddcutil setvcp command."""
-    cmd = ["sudo", "ddcutil", "setvcp", vcp_code, value]
+    # No sudo: the service user is in the 'i2c' group, which owns /dev/i2c-*.
+    cmd = ["ddcutil", "setvcp", vcp_code, value]
     try:
         res = subprocess.run(cmd, capture_output=True, timeout=3.5)
         return res.returncode == 0
@@ -753,6 +788,9 @@ def stop_current_mode():
             except Exception:
                 pass
         current_process = None
+        # The mode may have been SIGKILLed before it could clean up: never leave a
+        # "fresh" dBA value behind, or AudioMonitor would keep reading it.
+        _remove_bridge_file()
 
         # Kill orphaned browser processes (NOT labwc — it's reused)
         for proc_name in ["chromium", "chromium-browser", "cog"]:
@@ -1012,6 +1050,7 @@ def start_mode(mode):
         audio_idx if audio_idx is not None else ""
     )
     env["SMARTFRAME_DEBUG"] = "1" if DEBUG_MODE else "0"
+    env["SMARTFRAME_DBA_FILE"] = BRIDGE_FILE
     if mode == "mirror":
         env["MIRROR_URL"] = config.get("magic_mirror", {}).get(
             "url", "http://localhost:8080"
@@ -1215,7 +1254,8 @@ def command_worker():
         try:
             cmd, payload = command_queue.get()
             if cmd == "mode":
-                start_mode(payload)
+                with _mode_lock:
+                    start_mode(payload)
             elif cmd == "brightness":
                 set_display_brightness(payload)
             elif cmd == "contrast":
@@ -1230,11 +1270,21 @@ def command_worker():
 
 
 def on_message(client, userdata, msg):
-    # For general commands, we want to preserve case (especially for presets)
-    payload_raw = msg.payload.decode("utf-8").strip()
+    # Any exception escaping this callback would stop paho's network thread for good
+    # (the frame would go offline until restarted). Never let one bad message do that.
+    try:
+        _handle_message(msg)
+    except Exception:
+        logging.exception(f"Error while handling MQTT message on {msg.topic!r}")
+
+
+def _handle_message(msg):
+    # For general commands, we want to preserve case (especially for presets).
+    # errors="replace": invalid UTF-8 bytes must not raise (see on_message).
+    payload_raw = msg.payload.decode("utf-8", errors="replace").strip()
     payload_lower = payload_raw.lower()
 
-    logging.info(f"Message received on {msg.topic}: {payload_raw}")
+    logging.info(f"Message received on {msg.topic}: {payload_raw!r}")
 
     if msg.topic == MQTT_COMMAND_TOPIC:
         available_modes = get_available_modes()
@@ -1295,24 +1345,56 @@ if __name__ == "__main__":
     signal.signal(signal.SIGTERM, signal_handler)
 
     mqtt_client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
-    if MQTT_USER and MQTT_USER != "[MQTT_USERNAME]":
+    # Never let an exception in a callback kill paho's network thread. paho then only
+    # reports callback errors through its logger, so attach one.
+    mqtt_client.suppress_exceptions = True
+    mqtt_client.enable_logger(logging.getLogger("paho"))
+
+    has_credentials = bool(MQTT_USER) and MQTT_USER != "[MQTT_USERNAME]"
+    if has_credentials:
         mqtt_client.username_pw_set(MQTT_USER, MQTT_PASS)
+    else:
+        logging.warning(
+            "MQTT: no username/password configured. Anyone on the network who can "
+            "reach the broker can control this frame. Set mqtt.username and "
+            "mqtt.password in config.yaml (and require auth on the broker)."
+        )
+
+    if MQTT_TLS:
+        try:
+            mqtt_client.tls_set(ca_certs=MQTT_CA_CERT)
+            logging.info("MQTT: TLS enabled.")
+        except Exception as e:
+            logging.error(
+                f"MQTT: TLS setup failed ({e}). Check mqtt.ca_cert in config.yaml. "
+                "Starting in OFFLINE mode."
+            )
+            MQTT_BROKER = "[MQTT_SERVER_IP_ADDRESS]"  # Skip connecting below
+    elif has_credentials:
+        logging.warning(
+            "MQTT: TLS is disabled, so the password and all commands travel in clear "
+            "text on the network. Set mqtt.tls: true (usually port 8883) if your "
+            "broker supports it."
+        )
 
     mqtt_client.will_set(MQTT_STATUS_TOPIC, "offline", retain=True)
     mqtt_client.on_connect = on_connect
     mqtt_client.on_message = on_message
 
-    # Ensure kernel modules (optional but helpful for future I2C/DDC support)
-    try:
-        subprocess.run(
-            ["sudo", "modprobe", "i2c-dev"],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
+    # Note: the i2c-dev kernel module (needed by ddcutil) is loaded at boot through
+    # /etc/modules-load.d/smartframe.conf, installed by scripts/setup_pi.sh.
+    if sys.platform.startswith("linux") and not any(
+        f.startswith("i2c-") for f in os.listdir("/dev")
+    ):
+        logging.warning(
+            "No /dev/i2c-* device found: DDC/CI display control will not work. "
+            "Re-run scripts/setup_pi.sh (or: sudo modprobe i2c-dev)."
         )
-    except Exception:
-        pass
 
     logging.info("--- SmartFrame Orchestrator starting ---")
+
+    # A previous run may have left a "fresh-looking" dBA bridge file behind.
+    _remove_bridge_file()
 
     # 1. Initial State: Screen off until a mode starts
     # We run this in a thread because ddcutil can occasionally hang if the I2C bus is locked,
@@ -1353,55 +1435,48 @@ if __name__ == "__main__":
     last_discovery_time = time.time()
 
     try:
-        # --- GLOBAL FAIL-SAFE & SYNC LOOP (State Guardian) ---
+        # --- GLOBAL FAIL-SAFE & SYNC LOOP ---
         while True:
-            # Explicitly sync to ensure we are using the correct state
             now = time.time()
+            # One bad iteration must never stop the whole orchestrator.
+            try:
+                # 1. Watchdog: check if the current mode process has crashed.
+                # Skip this tick if a mode switch is in progress: the worker is
+                # stopping/starting processes and the state is in between.
+                if _mode_lock.acquire(blocking=False):
+                    try:
+                        proc = current_process  # Snapshot: the global can change
+                        if current_mode != "off" and proc is not None:
+                            poll_res = proc.poll()
+                            if poll_res is not None:
+                                logging.error(
+                                    f"FAIL-SAFE: Mode process '{current_mode}' exited "
+                                    f"(code {poll_res}). Resetting to 'off'."
+                                )
+                                current_process = None
+                                _remove_bridge_file()
+                                _stop_labwc()
+                                set_display_power(False)
+                                current_mode = "off"
+                                if mqtt_client and mqtt_client.is_connected():
+                                    mqtt_client.publish(MQTT_STATE_TOPIC, current_mode, retain=True)
+                    finally:
+                        _mode_lock.release()
 
-            # 1. Watchdog: Check if the current mode process has crashed unexpectedly
-            if current_mode != "off" and current_process:
-                poll_res = current_process.poll()
-                if poll_res is not None:
-                    # SMART CHECK: If dBA bridge is still being updated, don't declare crash yet
-                    bridge_file = "/tmp/smartframe_dba"
-                    is_active = False
-                    if os.path.exists(bridge_file) and (now - os.path.getmtime(bridge_file) < 5.0):
-                        is_active = True
-                        
-                    if not is_active:
-                        logging.error(f"FAIL-SAFE: Mode process '{current_mode}' exited (code {poll_res}). Resetting to 'off'.")
-                        current_process = None
-                        _stop_labwc()
-                        set_display_power(False)
-                        current_mode = "off"
-                        if mqtt_client and mqtt_client.is_connected():
-                            mqtt_client.publish(MQTT_STATE_TOPIC, current_mode, retain=True)
+                # 2. Aggressive UI Sync: Re-publish state every 5s to keep HA dashboard accurate
+                if now - last_sync_time > 5.0:
+                    if mqtt_client and mqtt_client.is_connected():
+                        mqtt_client.publish(MQTT_STATE_TOPIC, current_mode, retain=True)
+                        mqtt_client.publish(MQTT_BRIGHTNESS_STATE_TOPIC, str(_working_methods.get("brightness", 100)), retain=True)
+                    last_sync_time = now
 
-            # 2. Smart Detection: Sync state if we see 'phantom' activity
-            bridge_file = "/tmp/smartframe_dba"
-            if os.path.exists(bridge_file):
-                try:
-                    if now - os.path.getmtime(bridge_file) < 5.0:
-                        if current_mode == "off":
-                            logging.warning("GUARDIAN: Audio bridge active but state is 'off'. Syncing to 'audio'.")
-                            current_mode = "audio"
-                            if mqtt_client and mqtt_client.is_connected():
-                                mqtt_client.publish(MQTT_STATE_TOPIC, "audio", retain=True)
-                except Exception:
-                    pass
-
-            # 3. Aggressive UI Sync: Re-publish state every 5s to keep HA dashboard accurate
-            if now - last_sync_time > 5.0:
-                if mqtt_client and mqtt_client.is_connected():
-                    mqtt_client.publish(MQTT_STATE_TOPIC, current_mode, retain=True)
-                    mqtt_client.publish(MQTT_BRIGHTNESS_STATE_TOPIC, str(_working_methods.get("brightness", 100)), retain=True)
-                last_sync_time = now
-                
-            # 4. Global Re-announcement: Re-publish discovery every 5 mins
-            if now - last_discovery_time > 300.0:
-                if mqtt_client and mqtt_client.is_connected():
-                    publish_discovery_and_status(mqtt_client)
-                    last_discovery_time = now
+                # 3. Global Re-announcement: Re-publish discovery every 5 mins
+                if now - last_discovery_time > 300.0:
+                    if mqtt_client and mqtt_client.is_connected():
+                        publish_discovery_and_status(mqtt_client)
+                        last_discovery_time = now
+            except Exception:
+                logging.exception("Orchestrator loop iteration failed (continuing).")
 
             time.sleep(1)
 

@@ -115,7 +115,7 @@ The setup script installs all OS-level dependencies (`portaudio`, SDL2, Chromium
 
 The setup script creates `config.yaml` from `config.example.yaml` automatically. Edit `config.yaml` to set your preferences (it is gitignored):
 
-- **MQTT**: Set up your broker IP, port, and credentials.
+- **MQTT**: Set up your broker IP, port, and credentials. Set `tls: true` (and usually `port: 8883`) if your broker supports TLS; `ca_cert` can point to the broker's CA certificate. See [Security](#security).
 - **MagicMirror**: Set the URL corresponding to your local MagicMirror instance.
 - **Audio Mode**:
   - `threshold_db_warning`: Volume (in dB) where the dB text will turn yellow/orange (default: 60).
@@ -164,7 +164,35 @@ sudo apt update
 sudo apt install -y cec-utils ddcutil
 ```
 
-*Note: The setup script automatically handles group permissions (`i2c`) for these tools.*
+*Note: The setup script automatically handles group permissions (`i2c`, `video`) for these tools. SmartFrame never calls `sudo` at runtime.*
+
+## Security
+
+SmartFrame is designed to stay safe on an untrusted local network.
+
+- **MQTT credentials**: always set `mqtt.username` / `mqtt.password` and require authentication on the broker. Without them, anyone who can reach the broker can control the frame (a warning is logged at startup).
+- **MQTT encryption**: with `tls: false`, the password and all commands travel in clear text. Enable `tls: true` if your broker supports it.
+- **Broker ACL**: give the frame its own MQTT user, limited to its own topics (adjust if you changed the topic names). Example for Mosquitto (`acl_file`):
+
+  ```text
+  # Home Assistant's own MQTT user keeps full access
+  user homeassistant
+  topic readwrite #
+
+  # The frame can only use its own topics and publish discovery
+  user smartframe
+  topic readwrite smartframe/#
+  topic write homeassistant/#
+  ```
+
+  **Warning:** once an `acl_file` is set, any user not listed in it gets no access at all. List every MQTT user you use (Home Assistant, other devices), or they will stop working. If your broker is managed by a Home Assistant add-on, configure ACLs the way that add-on documents.
+
+- **`config.yaml`** contains the MQTT password. It is set to `chmod 600` (owner only) by the setup script and at startup.
+- **No `sudo` at runtime**: the service uses group permissions only (`i2c` for `ddcutil`, `video` for the framebuffer). `scripts/setup_hardware_access.sh` (run by `setup_pi.sh`) loads `i2c-dev` at boot (`/etc/modules-load.d/smartframe.conf`) and installs a udev rule (`/etc/udev/rules.d/99-smartframe-fb.rules`). It only changes what is missing, so it is safe to run again.
+
+  **Updating an existing install:** the git `post-merge` hook runs this script after each `git pull` (it asks for `sudo` only if something is missing) and keeps itself up to date. On installs made before this hook existed, run `./scripts/setup_hardware_access.sh` once by hand.
+
+  *Optional hardening:* Raspberry Pi OS gives the default user passwordless `sudo` for everything (file in `/etc/sudoers.d/`). SmartFrame no longer needs it. Removing it limits the damage of any bug, but **make sure you know your user password first**, or you will lose `sudo` access.
 
 ## Performance & Persistent Caching
 
