@@ -23,7 +23,19 @@ if [ -x "$REPO_ROOT/scripts/setup_hardware_access.sh" ]; then
     "$REPO_ROOT/scripts/setup_hardware_access.sh" || echo "[post-merge] Warning: hardware access setup failed."
 fi
 
-# 3. Keep this hook up to date with the version in the repository.
+# 3. Restart the service so the pulled code is actually running.
+#    (git runs this hook only when the pull brought changes. `sudo -n` never prompts:
+#    if a password is required, the hook prints the command instead of hanging.)
+if command -v systemctl >/dev/null 2>&1 && systemctl cat smartframe.service >/dev/null 2>&1; then
+    echo "[post-merge] Restarting smartframe service..."
+    if sudo -n systemctl restart smartframe.service 2>/dev/null; then
+        echo "[post-merge] Service restarted."
+    else
+        echo "[post-merge] Warning: could not restart automatically. Run: sudo systemctl restart smartframe"
+    fi
+fi
+
+# 4. Keep this hook up to date with the version in the repository.
 #    (mv is atomic: the shell running this file keeps reading the old copy)
 HOOK_SRC="$REPO_ROOT/scripts/post-merge.hook"
 HOOK_DST="$(git rev-parse --git-path hooks/post-merge)"
