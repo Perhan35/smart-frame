@@ -4,8 +4,8 @@
 **Base :** tout le dépôt (`main.py`, `modes/`, `scripts/`, service systemd, README, config).
 **Hypothèses retenues :**
 
-- Le Pi est sur un **réseau partagé** (invités, colocataires ou objets connectés pas fiables sur le même Wi-Fi). Les points réseau (MQTT, TLS) sont donc remontés en priorité.
-- Pour l'audio, **les deux comptent autant** : un chiffre dBA fiable dans Home Assistant **et** un joli visuel à l'écran.
+- Le cadre doit rester sûr même sur un réseau local **non fiable** (Wi-Fi partagé, objets connectés). Les points réseau (MQTT, TLS) sont donc prioritaires.
+- Pour l'audio, on vise à la fois un chiffre dBA fiable dans Home Assistant **et** un joli visuel à l'écran.
 
 Ce fichier **fusionne** la revue détaillée [CODE_REVIEW.md](CODE_REVIEW.md) (réf. `SEC-x`, `A-x`, `Q-x`, `DSP-x`, `EFF-x`, solutions `R-x`) et les **nouveaux points** trouvés dans cette analyse (réf. `N-xx`, détaillés en bas de page). Aucun code n'a changé depuis CODE_REVIEW.md : tous ses points sont encore ouverts.
 
@@ -25,7 +25,7 @@ Ce fichier **fusionne** la revue détaillée [CODE_REVIEW.md](CODE_REVIEW.md) (r
 1. **#1 N-02** : un seul message MQTT invalide coupe MQTT pour de bon (5 min de travail).
 2. **#2 Q-1** : des « races » entre threads peuvent faire planter tout l'orchestrateur.
 3. **#3 N-01** : en passant de `audio` à `off`, l'état se bloque sur `audio`.
-4. **#4 SEC-3** : MQTT en clair, mot de passe optionnel, sur un réseau partagé.
+4. **#4 SEC-3** : MQTT en clair, mot de passe optionnel.
 5. **#5 SEC-1** : le service dépend de `sudo` sans mot de passe (tout bug devient « root »).
 6. Puis les **P1 audio** (#17 à #24), qui rendent le chiffre dBA dans HA cohérent.
 
