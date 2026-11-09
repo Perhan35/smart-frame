@@ -1,5 +1,5 @@
 #!/bin/bash
-# Temporary performance report (see smartframe/perf.py). Run on the Pi.
+# Optional performance report (see smartframe/perf.py). Run on the Pi.
 #
 #   scripts/perf_report.sh on       # turn measurements on (restarts the service)
 #   scripts/perf_report.sh collect  # write a report file after testing

@@ -1,6 +1,7 @@
-"""Temporary performance measurements (startup, mode switch, frame times, CPU).
+"""Optional performance measurements (startup, mode switch, frame times, CPU).
 
-Off by default: every function returns at once unless SMARTFRAME_PERF=1.
+Off by default: nothing is measured and every function returns at once unless
+SMARTFRAME_PERF=1 (scripts/perf_report.sh on / off sets it for the service).
 Output lines start with "[PERF]" and go to stdout (journalctl -u smartframe).
 
 To remove: delete this file, scripts/perf_report.sh and scripts/perf_set_mode.py,
@@ -28,7 +29,7 @@ def _process_start_wall():
         return time.time()
 
 
-_proc_start = _process_start_wall()
+_proc_start = _process_start_wall() if ENABLED else 0.0
 
 
 def _log(msg):

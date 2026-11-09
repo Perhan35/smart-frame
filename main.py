@@ -819,22 +819,23 @@ def _run_vcp_command(vcp_code, value):
 def _kill_own(names):
     """Fallback cleanup: kill this user's processes whose name is exactly one of
     `names`. (pkill -f would also hit any command line that merely contains the
-    word, e.g. "cog" in "recognizer.py".) Normal cleanup kills the process group."""
-    for name in names:
-        try:
-            subprocess.run(
-                ["pkill", "-x", "-u", str(os.getuid()), name],
-                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=2,
-            )
-        except Exception as e:
-            logging.debug(f"pkill {name} failed: {e}")
+    word, e.g. "cog" in "recognizer.py".) Normal cleanup kills the process group.
+    One pkill for all names: with -x, "a|b" must match a whole name."""
+    try:
+        subprocess.run(
+            ["pkill", "-x", "-u", str(os.getuid()), "|".join(names)],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=2,
+        )
+    except Exception as e:
+        logging.debug(f"pkill {names} failed: {e}")
 
 
-def _kill_group(proc):
-    """SIGTERM the process group started for `proc`, then SIGKILL if it lingers."""
+def _kill_group(proc, grace=2.0):
+    """SIGTERM the process group started for `proc`, then SIGKILL if it lingers
+    more than `grace` seconds."""
     try:
         os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
-        proc.wait(timeout=2)
+        proc.wait(timeout=grace)
         perf.mark("stop: exited after SIGTERM")  # PERF
     except (subprocess.TimeoutExpired, ProcessLookupError, PermissionError):
         perf.mark("stop: not gone after SIGTERM, sending SIGKILL")  # PERF
@@ -852,11 +853,13 @@ def stop_current_mode():
     if current_process:
         logging.info("Stopping current mode process...")
         # Only the shell modes (mirror) start a browser: no browser cleanup after a
-        # Python mode (audio), which saves three pkill runs on every switch.
+        # Python mode (audio), which saves a pkill run on every switch.
         started_browser = any(str(arg).endswith(".sh") for arg in current_process.args)
         # The mode runs in its own session (start_new_session=True), so killing its
-        # group also stops the browser it started.
-        _kill_group(current_process)
+        # group also stops the browser it started. A kiosk browser has nothing to
+        # save and needs more than 2 s to shut down cleanly on a Pi Zero 2: it only
+        # gets 0.5 s (Chromium runs with --hide-crash-restore-bubble).
+        _kill_group(current_process, grace=0.5 if started_browser else 2.0)
         current_process = None
 
         # Browsers that escaped the group (NOT labwc: it is reused). "chromium-browse"
