@@ -1391,7 +1391,22 @@ def command_worker():
                         logging.info(f"Relaunching crashed mode '{payload}'.")
                         start_mode(payload, restart=True)
             elif cmd == "display_off":
-                set_display_power(False)
+                # Startup in "off". With keep_compositor_when_off, labwc is started now
+                # (screen still off), as if a mode had run: the first switch then skips
+                # its 5-6 s cold start, like every later switch from "off".
+                with _mode_lock:
+                    if KEEP_COMPOSITOR_WHEN_OFF and current_mode == "off":
+                        setup_display_env()
+                    # Same rule as _launch_mode: no labwc inside an existing desktop session
+                    if (KEEP_COMPOSITOR_WHEN_OFF and current_mode == "off"
+                            and not os.environ.get("WAYLAND_DISPLAY")
+                            and not os.environ.get("DISPLAY")):
+                        try:
+                            _ensure_labwc()
+                        except Exception as e:
+                            logging.warning(f"Could not pre-start labwc ({e}). "
+                                            "It will start with the first mode.")
+                    set_display_power(False)
             elif cmd == "brightness":
                 set_display_brightness(payload)
             elif cmd == "contrast":

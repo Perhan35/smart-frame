@@ -649,6 +649,35 @@ def signal_handler(sig, frame):
 signal.signal(signal.SIGTERM, signal_handler)
 signal.signal(signal.SIGINT, signal_handler)
 
+# --- PARTIAL WIPE ---
+# Each frame only wipes what the previous one drew (copied back from the static
+# layer), not the whole screen: a full copy costs ~10 ms per frame at render_scale
+# 0.75. The analyzer is wiped in vertical strips, each only as high as its tallest
+# bar, peak or curve point (the bass is often high while the treble stays low).
+WIPE_STRIPS = 12
+WIPE_MARGIN = px(12)  # Glow (10 px above its bar), peak marks, curve antialiasing
+_strip_edges = np.linspace(0, NUM_BANDS, WIPE_STRIPS + 1).astype(int)
+_band_pitch = bar_width + bar_spacing
+_screen_rect = screen.get_rect()
+dirty_rects = [_screen_rect]  # Drawn on the previous frame: wiped on the next one
+dirty_on_legend = None  # Background of the previous frame (True: static layer, False: black)
+
+
+def analyzer_rects(levels):
+    """Screen areas of this frame's bars, peaks, glow and curve (one per strip).
+    `levels`: per band, the highest of bar, peak and curve (0..1)."""
+    rects = []
+    for a, b in zip(_strip_edges[:-1], _strip_edges[1:]):
+        # One band more on each side: curve segments cross into the next strip
+        level = float(levels[max(a - 1, 0):min(b + 1, NUM_BANDS)].max())
+        top = analyzer_y_bottom - int(level * analyzer_height) - WIPE_MARGIN
+        x0 = start_x + a * _band_pitch - WIPE_MARGIN
+        x1 = start_x + b * _band_pitch + WIPE_MARGIN
+        rect = pygame.Rect(x0, top, x1 - x0, analyzer_y_bottom + px(3) - top)
+        rects.append(rect.clip(_screen_rect))
+    return rects
+
+
 # --- STATS MONITORING ---
 last_stats_update = 0
 cpu_usage = 0
@@ -726,11 +755,18 @@ while running:
             perf.frames.add("mic_samples", len(new_data))  # PERF
 
     perf.frames.lap("mic_wait")  # PERF
-    # Static layer = black background + legend (a plain copy, no blending)
-    if new_data is not None:
-        screen.blit(static_layer, (0, 0))
-    else:
-        screen.fill((0, 0, 0))
+    # Wipe last frame's drawings: static layer (black + legend) with sound, plain
+    # black on the "waiting" screen. A change of background wipes everything.
+    on_legend = new_data is not None
+    if on_legend != dirty_on_legend:
+        dirty_rects = [_screen_rect]
+        dirty_on_legend = on_legend
+    for rect in dirty_rects:
+        if on_legend:
+            screen.blit(static_layer, rect, rect)
+        else:
+            screen.fill((0, 0, 0), rect)
+    dirty_rects = []
 
     perf.frames.lap("clear")  # PERF
     # --- UPDATE CPU STATS (1Hz, only when shown: audio.show_debug) ---
@@ -753,7 +789,8 @@ while running:
         if cpu_temp > 75:
             stats_color = (220, 80, 80)  # Warning red for high temp
         stats_text = f"CPU {int(cpu_usage)}%  |  {cpu_temp:.1f}°C"
-        screen.blit(render_text(font_tiny, stats_text, stats_color), (MARGIN, MARGIN))
+        dirty_rects.append(
+            screen.blit(render_text(font_tiny, stats_text, stats_color), (MARGIN, MARGIN)))
 
     if new_data is not None:
         # --- SOUND LEVEL (shared DSP, same math as the orchestrator) ---
@@ -877,6 +914,7 @@ while running:
                 pygame.draw.aaline(screen, c, p1, p2)
                 # Draw a second slightly offset line for a 'thickness' feel without losing AA
                 pygame.draw.aaline(screen, c, (p1[0], p1[1] - 1), (p2[0], p2[1] - 1))
+        dirty_rects.extend(analyzer_rects(np.maximum(np.maximum(bar_heights, peak_pos), curve_heights)))
 
         # Determine color based on threshold (Evaluate using dBA, professional standard)
         text_color = (180, 255, 180)  # Brighter Green
@@ -889,22 +927,22 @@ while running:
         dba_text = render_text(font_extra_large, f"{int(round(last_displayed_dba))} dBA", text_color)
         dba_rect = dba_text.get_rect()
         dba_rect.topright = (screen.get_width() - MARGIN, MARGIN)
-        screen.blit(dba_text, dba_rect)
+        dirty_rects.append(screen.blit(dba_text, dba_rect))
 
         # Render dBZ text (Medium)
         dbz_text = render_text(font_medium, f"{last_displayed_dbz:.1f} dBZ", (180, 210, 180))
         dbz_rect = dbz_text.get_rect()
         dbz_rect.topright = (screen.get_width() - MARGIN, dba_rect.bottom + px(10))
-        screen.blit(dbz_text, dbz_rect)
+        dirty_rects.append(screen.blit(dbz_text, dbz_rect))
 
         if SHOW_DEBUG:
             # "FAST RESPONSE" indicator (Tiny status info, pre-rendered)
             badge_rect = badge_surface.get_rect()
             badge_rect.topright = (screen.get_width() - MARGIN, dbz_rect.bottom + px(10))
-            screen.blit(badge_surface, badge_rect)
+            dirty_rects.append(screen.blit(badge_surface, badge_rect))
     else:
         # 1. The "No Mic" icon in the top-left corner
-        screen.blit(no_mic_icon, (MARGIN, MARGIN))
+        dirty_rects.append(screen.blit(no_mic_icon, (MARGIN, MARGIN)))
 
         # 2. Render localized error message
         error_text = render_text(
@@ -913,7 +951,7 @@ while running:
         text_rect = error_text.get_rect(
             center=(screen.get_width() / 2, screen.get_height() / 2)
         )
-        screen.blit(error_text, text_rect)
+        dirty_rects.append(screen.blit(error_text, text_rect))
 
     perf.frames.lap("draw")  # PERF
     pygame.display.flip()

@@ -48,6 +48,14 @@ if [ -f "/etc/systemd/system/smartframe.service" ]; then
     ACTION="updated"
 fi
 
+# labwc's Wayland socket lives in /run/user/<uid>. Without "linger", that folder only
+# exists while the user is logged in: it is deleted at the last logout (e.g. when an
+# SSH session closes), taking the socket of the running compositor with it.
+if [ "$(loginctl show-user "$SERVICE_USER" -p Linger --value 2>/dev/null)" != "yes" ]; then
+    sudo loginctl enable-linger "$SERVICE_USER"
+    echo "Enabled linger for '$SERVICE_USER': /run/user/$(id -u "$SERVICE_USER") now stays available."
+fi
+
 # Install or update the service
 sudo install -m 644 "$TMP_UNIT" /etc/systemd/system/smartframe.service
 
