@@ -41,4 +41,4 @@ audio:
   calibration_slope: 1.0 # Optional 2nd calibration point (see README). 1.0 = offset only
   noise_floor_dba: null # Mic self-noise in dBA, removed from quiet readings. Set it after calibrating: scripts/measure_noise_floor.py, or ~33 (INMP441 datasheet)
   show_debug: true # CPU stats and "FAST RESPONSE | SLOPE" on the audio screen
-  render_scale: 1.0 # < 1 = draw smaller and let the GPU scale up (smoothed). 0.75 = good balance, 0.5 = ~4x fewer pixels but softer
+  render_scale: 1.0 # < 1 = draw the bars smaller and let the GPU scale them up (smoothed); text stays sharp. 0.75 = good balance, 0.5 = least CPU

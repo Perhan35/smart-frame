@@ -134,7 +134,7 @@ The setup script creates `config.yaml` from `config.example.yaml` automatically.
   - `calibration_slope`: (Optional) second calibration point. `1.0` = offset only.
   - `noise_floor_dba`: (Optional) the mic's own noise in dBA, removed from every reading in energy. Set it **after** calibrating, either with `scripts/measure_noise_floor.py` (stop the service first, measure in a very quiet room) or with the INMP441 datasheet value (about 33). Leave it empty for no correction.
   - `show_debug`: `true` (default) shows the CPU stats and the "FAST RESPONSE | SLOPE" line on the audio screen. `false` hides them.
-  - `render_scale`: `1.0` (default) draws at the screen's resolution. Lower values draw a smaller image and let the GPU scale it up with smoothing: `0.75` is a good balance (about half the pixels), `0.5` draws about 4x fewer pixels but looks softer.
+  - `render_scale`: `1.0` (default) draws at the screen's resolution. Lower values draw the bars and the curve smaller and let the GPU scale them up with smoothing, while the text and the legend stay at full resolution (sharp): `0.75` is a good balance (about half the pixels), `0.5` uses the least CPU. Without a usable GPU renderer, the whole image (text included) is scaled.
 
 ### Sound level: what the numbers mean
 

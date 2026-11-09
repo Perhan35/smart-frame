@@ -159,29 +159,118 @@ with ignore_stderr():
 perf.mark("pygame_init_done")  # PERF
 
 
+def _desktop_size():
+    try:
+        return tuple(pygame.display.get_desktop_sizes()[0])
+    except (pygame.error, IndexError):
+        return (1920, 1080)
+
+
+def _scaled_size():
+    """The drawing size for render_scale (the screen's own size at 1.0)."""
+    desktop_w, desktop_h = _desktop_size()
+    return (max(1, round(desktop_w * RENDER_SCALE)), max(1, round(desktop_h * RENDER_SCALE)))
+
+
 def _open_screen():
-    """Full screen at the screen's own size (or a fraction of it with render_scale)."""
+    """Classic display: one surface, at the screen's own size or scaled by SDL
+    (render_scale < 1; then the text is scaled up with the bars)."""
     if RENDER_SCALE < 1.0:
-        try:
-            desktop_w, desktop_h = pygame.display.get_desktop_sizes()[0]
-        except (pygame.error, IndexError):
-            desktop_w, desktop_h = 1920, 1080
-        size = (max(1, round(desktop_w * RENDER_SCALE)), max(1, round(desktop_h * RENDER_SCALE)))
-        print(f"Rendering at {size[0]}x{size[1]}, scaled up to {desktop_w}x{desktop_h}.")
+        size = _scaled_size()
+        print(f"Rendering at {size[0]}x{size[1]}, scaled up to {_desktop_size()}.")
         return pygame.display.set_mode(size, pygame.FULLSCREEN | pygame.SCALED)
     # DOUBLEBUF and HWSURFACE hint SDL2 to use the GPU/video memory if available
     return pygame.display.set_mode((0, 0), pygame.FULLSCREEN | pygame.DOUBLEBUF | pygame.HWSURFACE)
 
 
-try:
-    screen = _open_screen()
-except pygame.error as e:
+class GpuLayers:
+    """Sharp text over smooth bars: the GPU stacks three layers on every frame.
+
+    1. The canvas (bars, peaks, glow, curve): drawn at render_scale on an opaque black
+       surface and stretched to the screen with smoothing. Only the parts that changed
+       are sent to the GPU.
+    2. The legend band under the bars: drawn once, at full resolution.
+    3. Texts and icons: each one its own full-resolution texture, drawn 1:1 (sharp).
+    """
+
+    def __init__(self, full_size, canvas_size):
+        from pygame._sdl2.video import Renderer, Texture, Window  # Experimental pygame API
+
+        self._texture_cls = Texture
+        self.full_rect = pygame.Rect((0, 0), full_size)
+        self.window = Window("SmartFrame - Audio Spectrum Analyzer", size=full_size,
+                             fullscreen_desktop=True, opengl=True)
+        try:
+            # accelerated=1: no software fallback (compositing 1080p on the CPU is slower
+            # than the classic display).
+            self.renderer = Renderer(self.window, accelerated=1, vsync=False)
+            output = tuple(self.renderer.get_viewport().size)
+            if output != tuple(full_size):
+                print(f"Warning: GPU output is {output}, not {tuple(full_size)}: text is scaled.")
+            self.renderer.logical_size = full_size
+            self.canvas = pygame.Surface(canvas_size)
+            self.canvas.fill((0, 0, 0))
+            self.canvas_rect = self.canvas.get_rect()
+            self.canvas_texture = Texture(self.renderer, canvas_size, streaming=True)
+            self.canvas_texture.update(self.canvas)
+        except Exception:
+            self.window.destroy()
+            raise
+        self.legend_texture = None
+        self.legend_rect = None
+        self._textures = {}  # id(surface) -> (surface, texture)
+        self._queue = []  # (texture, rect) to draw over the canvas on this frame
+
+    def set_legend(self, surface, topleft):
+        self.legend_texture = self._texture_cls.from_surface(self.renderer, surface)
+        self.legend_rect = surface.get_rect(topleft=topleft)
+
+    def show(self, surface, topleft):
+        """Draw `surface` (a text or an icon) at `topleft`, full-resolution coordinates."""
+        entry = self._textures.get(id(surface))
+        if entry is None or entry[0] is not surface:
+            if len(self._textures) > 300:
+                self._textures.clear()
+            entry = (surface, self._texture_cls.from_surface(self.renderer, surface))
+            self._textures[id(surface)] = entry
+        self._queue.append((entry[1], surface.get_rect(topleft=topleft)))
+
+    def present(self, changed_rects, legend):
+        """Send the changed parts of the canvas to the GPU, stack the layers, show them."""
+        for rect in changed_rects:
+            rect = rect.clip(self.canvas_rect)
+            if rect.w > 0 and rect.h > 0:
+                self.canvas_texture.update(self.canvas.subsurface(rect), rect)
+        self.canvas_texture.draw(dstrect=self.full_rect)  # Covers everything: no clear()
+        if legend and self.legend_texture is not None:
+            self.legend_texture.draw(dstrect=self.legend_rect)
+        for texture, rect in self._queue:
+            texture.draw(dstrect=rect)
+        self._queue.clear()
+        self.renderer.present()
+
+
+gpu = None  # GpuLayers, or None: classic display (everything drawn on `screen`)
+if HAS_GPU and os.environ.get("SDL_VIDEODRIVER") != "dummy":
     try:
-        _use_dummy_display(e)
-        screen = pygame.display.set_mode((1, 1))
-    except pygame.error:
-        print("Fatal error: Could not initialize display.")
-        sys.exit(1)
+        gpu = GpuLayers(_desktop_size(), _scaled_size())
+        screen = gpu.canvas
+        print(f"GPU layers: bars at {screen.get_width()}x{screen.get_height()}, "
+              f"text at {gpu.full_rect.w}x{gpu.full_rect.h}.")
+    except Exception as e:
+        print(f"GPU layers unavailable ({e}). Using the classic display.")
+        gpu = None
+
+if gpu is None:
+    try:
+        screen = _open_screen()
+    except pygame.error as e:
+        try:
+            _use_dummy_display(e)
+            screen = pygame.display.set_mode((1, 1))
+        except pygame.error:
+            print("Fatal error: Could not initialize display.")
+            sys.exit(1)
 perf.mark("set_mode_done")  # PERF
 pygame.display.set_caption("SmartFrame - Audio Spectrum Analyzer")
 
@@ -425,7 +514,6 @@ analyzer_height = screen.get_height() // 2 + px(80)
 analyzer_y_bottom = screen.get_height() - px(150)
 bar_spacing = px(3)  # Tighter spacing for higher density
 total_bars_width = screen.get_width() - px(100)
-MARGIN = px(50)
 bar_width = max(1, (total_bars_width // NUM_BANDS) - bar_spacing)
 start_x = (screen.get_width() - (NUM_BANDS * (bar_width + bar_spacing))) // 2
 curve_x = [start_x + i * (bar_width + bar_spacing) + (bar_width // 2) for i in range(NUM_BANDS)]
@@ -437,9 +525,22 @@ BAR_ALPHA = 140 / 255.0
 PEAK_BAR_COLOR = (234, 234, 234)  # White at alpha 230 over the glow
 GLOW_COLOR = (40, 40, 40)  # White at alpha 40 over black
 
-font_extra_large = pygame.font.Font(None, px(220))
-font_medium = pygame.font.Font(None, px(80))
-font_tiny = pygame.font.Font(None, px(25))
+# Texts, icons and the legend have their own size: the full screen with the GPU
+# layers (sharp at any render_scale), the drawing surface otherwise.
+TEXT_W, TEXT_H = gpu.full_rect.size if gpu is not None else screen.get_size()
+TEXT_SCALE = TEXT_H / 1080.0
+TEXT_K = TEXT_SCALE / UI_SCALE  # Drawing-surface pixels -> text pixels
+
+
+def tpx(value):
+    """A 1080p size in text pixels (never below 1)."""
+    return max(1, int(round(value * TEXT_SCALE)))
+
+
+MARGIN = tpx(50)
+font_extra_large = pygame.font.Font(None, tpx(220))
+font_medium = pygame.font.Font(None, tpx(80))
+font_tiny = pygame.font.Font(None, tpx(25))
 
 _text_cache = {}
 
@@ -463,35 +564,41 @@ def _freq_to_x(f):
     return start_x + pos * (bar_width + bar_spacing)
 
 
-def build_static_layer():
-    """Draw once everything that never moves: frequency labels and range legend."""
-    layer = pygame.Surface(screen.get_size()).convert()
+def build_static_layer(size, top=0):
+    """Draw once everything that never moves: frequency labels and range legend.
+
+    Text coordinates; `top` is the screen row the returned surface starts at (the
+    GPU layers only keep the band under the bars)."""
+    layer = pygame.Surface(size)
+    if gpu is None:
+        layer = layer.convert()  # Needs the classic display
     layer.fill((0, 0, 0))
+    bottom = analyzer_y_bottom * TEXT_K - top  # Bottom of the bars, in this layer
 
     # Labels for key frequencies
     for f in [60, 250, 1000, 4000, 16000]:
         if MIN_FREQ <= f <= MAX_FREQ:
-            label_x = _freq_to_x(f)
+            label_x = _freq_to_x(f) * TEXT_K
             label_text = f"{int(f / 1000)}k" if f >= 1000 else f"{f}"
             label_surface = font_tiny.render(label_text, True, (130, 150, 130))
-            layer.blit(label_surface, label_surface.get_rect(midtop=(label_x, analyzer_y_bottom + px(15))))
+            layer.blit(label_surface, label_surface.get_rect(midtop=(label_x, bottom + tpx(15))))
             pygame.draw.line(
                 layer, (60, 80, 60),
-                (label_x, analyzer_y_bottom + px(2)), (label_x, analyzer_y_bottom + px(10)), 1,
+                (label_x, bottom + tpx(2)), (label_x, bottom + tpx(10)), 1,
             )
 
     # Multi-level range labels
     for rng in FREQ_RANGES:
         if rng["max"] >= MIN_FREQ and rng["min"] <= MAX_FREQ:
-            x_start = _freq_to_x(max(rng["min"], MIN_FREQ))
-            x_end = _freq_to_x(min(rng["max"], MAX_FREQ))
-            level_y = analyzer_y_bottom + px(50) + (rng["level"] * px(40))
+            x_start = _freq_to_x(max(rng["min"], MIN_FREQ)) * TEXT_K
+            x_end = _freq_to_x(min(rng["max"], MAX_FREQ)) * TEXT_K
+            level_y = bottom + tpx(50) + (rng["level"] * tpx(40))
             line_color = rng["color"]
-            pygame.draw.line(layer, line_color, (x_start + 2, level_y), (x_end - 2, level_y), px(2))
-            pygame.draw.line(layer, line_color, (x_start + 2, level_y - px(5)), (x_start + 2, level_y + px(5)), 1)
-            pygame.draw.line(layer, line_color, (x_end - 2, level_y - px(5)), (x_end - 2, level_y + px(5)), 1)
+            pygame.draw.line(layer, line_color, (x_start + 2, level_y), (x_end - 2, level_y), tpx(2))
+            pygame.draw.line(layer, line_color, (x_start + 2, level_y - tpx(5)), (x_start + 2, level_y + tpx(5)), 1)
+            pygame.draw.line(layer, line_color, (x_end - 2, level_y - tpx(5)), (x_end - 2, level_y + tpx(5)), 1)
             range_surface = font_tiny.render(rng["name"], True, line_color)
-            range_rect = range_surface.get_rect(center=((x_start + x_end) // 2, level_y + px(15)))
+            range_rect = range_surface.get_rect(center=((x_start + x_end) // 2, level_y + tpx(15)))
             # Only draw if there is space
             if x_end - x_start > range_rect.width:
                 layer.blit(range_surface, range_rect)
@@ -507,13 +614,19 @@ def build_no_mic_icon():
     pygame.draw.line(icon, (100, 100, 100), (35, 80), (65, 80), 3)
     # The warning slash (red)
     pygame.draw.line(icon, (255, 50, 50), (20, 20), (80, 80), 6)
-    if px(100) != 100:
-        icon = pygame.transform.smoothscale(icon, (px(100), px(100)))
+    if tpx(100) != 100:
+        icon = pygame.transform.smoothscale(icon, (tpx(100), tpx(100)))
     return icon
 
 
 perf.mark("display_ready")  # PERF
-static_layer = build_static_layer()
+if gpu is None:
+    static_layer = build_static_layer(screen.get_size())
+else:
+    # The legend band starts just under the bars (they never reach it), and is drawn
+    # over the canvas, opaque, at full resolution.
+    _legend_top = int((analyzer_y_bottom + px(2)) * TEXT_K)
+    gpu.set_legend(build_static_layer((TEXT_W, TEXT_H - _legend_top), _legend_top), (0, _legend_top))
 no_mic_icon = build_no_mic_icon()
 slope_info = f"{SLOPE_DB_PER_OCTAVE}dB SL" if SLOPE_DB_PER_OCTAVE != 0 else "RAW"
 badge_surface = font_tiny.render(f"FAST RESPONSE | SLOPE: {slope_info}", True, (110, 135, 110))
@@ -678,6 +791,24 @@ def analyzer_rects(levels):
     return rects
 
 
+def show(surface, topleft):
+    """Draw a text or an icon (text coordinates): its own sharp texture with the GPU
+    layers, else straight onto the screen (then wiped on the next frame)."""
+    if gpu is not None:
+        gpu.show(surface, topleft)
+    else:
+        dirty_rects.append(screen.blit(surface, topleft))
+
+
+def changed_rects(wiped, drawn, everything):
+    """Canvas areas to send to the GPU: what was wiped plus what was drawn."""
+    if everything:
+        return [_screen_rect]
+    if len(wiped) == len(drawn):  # Same analyzer strips: one union each
+        return [a.union(b) for a, b in zip(wiped, drawn)]
+    return wiped + drawn
+
+
 # --- STATS MONITORING ---
 last_stats_update = 0
 cpu_usage = 0
@@ -758,15 +889,17 @@ while running:
     # Wipe last frame's drawings: static layer (black + legend) with sound, plain
     # black on the "waiting" screen. A change of background wipes everything.
     on_legend = new_data is not None
-    if on_legend != dirty_on_legend:
+    # With the GPU layers the canvas is plain black (the legend is its own layer).
+    wipe_all = on_legend != dirty_on_legend
+    if wipe_all:
         dirty_rects = [_screen_rect]
         dirty_on_legend = on_legend
     for rect in dirty_rects:
-        if on_legend:
+        if on_legend and gpu is None:
             screen.blit(static_layer, rect, rect)
         else:
             screen.fill((0, 0, 0), rect)
-    dirty_rects = []
+    wiped_rects, dirty_rects = dirty_rects, []
 
     perf.frames.lap("clear")  # PERF
     # --- UPDATE CPU STATS (1Hz, only when shown: audio.show_debug) ---
@@ -789,8 +922,7 @@ while running:
         if cpu_temp > 75:
             stats_color = (220, 80, 80)  # Warning red for high temp
         stats_text = f"CPU {int(cpu_usage)}%  |  {cpu_temp:.1f}°C"
-        dirty_rects.append(
-            screen.blit(render_text(font_tiny, stats_text, stats_color), (MARGIN, MARGIN)))
+        show(render_text(font_tiny, stats_text, stats_color), (MARGIN, MARGIN))
 
     if new_data is not None:
         # --- SOUND LEVEL (shared DSP, same math as the orchestrator) ---
@@ -926,35 +1058,38 @@ while running:
         # Render dBA text (Large, Integer only) — cached until the value changes
         dba_text = render_text(font_extra_large, f"{int(round(last_displayed_dba))} dBA", text_color)
         dba_rect = dba_text.get_rect()
-        dba_rect.topright = (screen.get_width() - MARGIN, MARGIN)
-        dirty_rects.append(screen.blit(dba_text, dba_rect))
+        dba_rect.topright = (TEXT_W - MARGIN, MARGIN)
+        show(dba_text, dba_rect.topleft)
 
         # Render dBZ text (Medium)
         dbz_text = render_text(font_medium, f"{last_displayed_dbz:.1f} dBZ", (180, 210, 180))
         dbz_rect = dbz_text.get_rect()
-        dbz_rect.topright = (screen.get_width() - MARGIN, dba_rect.bottom + px(10))
-        dirty_rects.append(screen.blit(dbz_text, dbz_rect))
+        dbz_rect.topright = (TEXT_W - MARGIN, dba_rect.bottom + tpx(10))
+        show(dbz_text, dbz_rect.topleft)
 
         if SHOW_DEBUG:
             # "FAST RESPONSE" indicator (Tiny status info, pre-rendered)
             badge_rect = badge_surface.get_rect()
-            badge_rect.topright = (screen.get_width() - MARGIN, dbz_rect.bottom + px(10))
-            dirty_rects.append(screen.blit(badge_surface, badge_rect))
+            badge_rect.topright = (TEXT_W - MARGIN, dbz_rect.bottom + tpx(10))
+            show(badge_surface, badge_rect.topleft)
     else:
         # 1. The "No Mic" icon in the top-left corner
-        dirty_rects.append(screen.blit(no_mic_icon, (MARGIN, MARGIN)))
+        show(no_mic_icon, (MARGIN, MARGIN))
 
         # 2. Render localized error message
         error_text = render_text(
             font_medium, "Waiting for I2S Microphone Signal...", (120, 120, 120)
         )
         text_rect = error_text.get_rect(
-            center=(screen.get_width() / 2, screen.get_height() / 2)
+            center=(TEXT_W / 2, TEXT_H / 2)
         )
-        dirty_rects.append(screen.blit(error_text, text_rect))
+        show(error_text, text_rect.topleft)
 
     perf.frames.lap("draw")  # PERF
-    pygame.display.flip()
+    if gpu is not None:
+        gpu.present(changed_rects(wiped_rects, dirty_rects, wipe_all), on_legend)
+    else:
+        pygame.display.flip()
     perf.frames.lap("flip")  # PERF
     # With a mic, waiting for its next chunk already paces the loop (~31 Hz), so this
     # never waits. Without one, it keeps the "waiting" screen from spinning the CPU.
