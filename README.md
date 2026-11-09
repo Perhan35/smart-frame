@@ -182,6 +182,14 @@ This generates the systemd service file from the template (`scripts/smartframe.s
 
 The unit is hardened: the service cannot gain new privileges (`sudo`, setuid) and cannot write system files. If you add a feature that needs more, see the comments in `scripts/smartframe.service`.
 
+Some systemd options are left out on purpose because they break the Mirror mode. Cog (WPE WebKit) locks the part that renders web pages in a sandbox (`bwrap`), and that sandbox stays the most useful protection here. `RestrictSUIDSGID` and `ProtectKernelLogs` both stop it from starting: Cog crashes (exit code 133), is relaunched 3 times, then the frame goes back to `off`. If the Mirror mode goes back to `off` after a change to the unit, look for `bwrap` errors:
+
+```bash
+journalctl -u smartframe -n 300 --no-pager | grep -E "bwrap|cog\[|FAIL-SAFE"
+```
+
+Set `debug: true` in `config.yaml` (then restart the service) to see the browser messages in the log.
+
 ## Universal Display Control (DDC/CI & CEC)
 
 SmartFrame features high-performance hardware display management, allowing it to bypass the slow "No Signal" standby delay and control the monitor's internal settings directly via DDC/CI.

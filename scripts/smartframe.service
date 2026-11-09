@@ -21,10 +21,8 @@ RestartSec=10
 NoNewPrivileges=yes
 ProtectSystem=full
 ProtectKernelModules=yes
-ProtectKernelLogs=yes
 ProtectControlGroups=yes
 LockPersonality=yes
-RestrictSUIDSGID=yes
 SystemCallArchitectures=native
 UMask=0077
 # Not enabled on purpose (they break this service):
@@ -34,6 +32,10 @@ UMask=0077
 #   ProtectKernelTunables   makes /sys read-only (screen-off fallback writes fb0/blank)
 #   MemoryDenyWriteExecute  breaks the browser's JavaScript engine
 #   RestrictNamespaces      breaks the browser sandbox
+#   RestrictSUIDSGID        blocks the openat2() call that bubblewrap (the Cog/WebKit
+#                           sandbox) needs: "bwrap: Can't open source /etc", Cog crashes
+#   ProtectKernelLogs       hides /proc/kmsg, so the kernel then refuses the new /proc
+#                           of that sandbox: "bwrap: Can't mount proc on /proc"
 
 [Install]
 WantedBy=multi-user.target
