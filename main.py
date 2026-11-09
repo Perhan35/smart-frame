@@ -835,7 +835,9 @@ def _kill_group(proc):
     try:
         os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
         proc.wait(timeout=2)
+        perf.mark("stop: exited after SIGTERM")  # PERF
     except (subprocess.TimeoutExpired, ProcessLookupError, PermissionError):
+        perf.mark("stop: not gone after SIGTERM, sending SIGKILL")  # PERF
         try:
             os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
         except ProcessLookupError:
@@ -849,6 +851,9 @@ def stop_current_mode():
     global current_process
     if current_process:
         logging.info("Stopping current mode process...")
+        # Only the shell modes (mirror) start a browser: no browser cleanup after a
+        # Python mode (audio), which saves three pkill runs on every switch.
+        started_browser = any(str(arg).endswith(".sh") for arg in current_process.args)
         # The mode runs in its own session (start_new_session=True), so killing its
         # group also stops the browser it started.
         _kill_group(current_process)
@@ -856,7 +861,9 @@ def stop_current_mode():
 
         # Browsers that escaped the group (NOT labwc: it is reused). "chromium-browse"
         # is "chromium-browser" cut to the 15-character process name limit.
-        _kill_own(["chromium", "chromium-browse", "cog"])
+        if started_browser:
+            _kill_own(["chromium", "chromium-browse", "cog"])
+        perf.mark("stop: browser cleanup done")  # PERF
 
         # Brief settle for the client process to release Wayland resources
         time.sleep(0.1)

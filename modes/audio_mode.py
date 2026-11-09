@@ -7,6 +7,8 @@ import yaml
 import ctypes
 import signal
 import time
+import queue
+import threading
 from contextlib import contextmanager
 
 # Shared DSP (smartframe/ package at the repo root): same level math as the orchestrator.
@@ -121,6 +123,11 @@ os.environ["SDL_VIDEO_WAYLAND_HIDECURSOR"] = "1"
 os.environ["SDL_MOUSE_RELATIVE"] = "1"
 os.environ["XCURSOR_SIZE"] = "0"
 os.environ["COG_PLATFORM_FDO_SHOW_CURSOR"] = "0"
+
+# render_scale < 1: SDL stretches the small image to the screen. pygame asks for
+# "nearest" (hard pixel blocks); "linear" smooths them. The environment variable wins
+# over pygame's default, and "nearest" can still be forced from the outside.
+os.environ.setdefault("SDL_RENDER_SCALE_QUALITY", "linear")
 
 # Detect GPU availability for SDL2
 HAS_GPU = os.path.exists("/dev/dri/card0") or os.path.exists("/dev/dri/renderD128")
@@ -512,7 +519,8 @@ slope_info = f"{SLOPE_DB_PER_OCTAVE}dB SL" if SLOPE_DB_PER_OCTAVE != 0 else "RAW
 badge_surface = font_tiny.render(f"FAST RESPONSE | SLOPE: {slope_info}", True, (110, 135, 110))
 
 # --- MICROPHONE STREAM ---
-stream = None
+MIC_QUEUE_CHUNKS = 64  # ~2 s of sound: if the screen stalls longer, the oldest is dropped
+mic = None  # MicReader of the open stream
 meter = None
 last_open_attempt = -OPEN_RETRY_S
 last_open_error = None
@@ -567,6 +575,58 @@ def close_stream(s):
         s.close()
     except Exception as e:
         print(f"Closing the audio stream failed: {e}")
+
+
+class MicReader:
+    """Reads the mic in its own thread, so a slow frame never loses sound.
+
+    The drawing loop takes everything that came in since the previous frame
+    (read_all): the level meter sees every sample, whatever the frame rate.
+    """
+
+    def __init__(self, stream):
+        self.stream = stream
+        self.error = None  # Set by the thread when a read fails (it then stops)
+        self._chunks = queue.Queue(maxsize=MIC_QUEUE_CHUNKS)
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._run, name="mic-reader", daemon=True)
+        self._thread.start()
+
+    def _run(self):
+        while not self._stop.is_set():
+            try:
+                data = self.stream.read(CHUNK_READ, exception_on_overflow=False)
+            except Exception as e:
+                self.error = e
+                return
+            if self._chunks.full():
+                try:
+                    self._chunks.get_nowait()  # Screen stalled: drop the oldest chunk
+                    perf.frames.add("mic_dropped_chunks", 1)  # PERF
+                except queue.Empty:
+                    pass
+            self._chunks.put(data)
+
+    def read_all(self, timeout):
+        """All the bytes received so far, waiting up to `timeout` s for the first chunk."""
+        try:
+            chunks = [self._chunks.get(timeout=timeout)]
+        except queue.Empty:
+            return b""
+        while True:
+            try:
+                chunks.append(self._chunks.get_nowait())
+            except queue.Empty:
+                return b"".join(chunks)
+
+    def close(self):
+        """Stop the thread, then the stream (a stream being read must not be closed)."""
+        self._stop.set()
+        self._thread.join(timeout=0.5)  # One read is ~32 ms
+        if self._thread.is_alive():
+            print("Mic reader still busy: leaving the stream to the process exit.")
+            return
+        close_stream(self.stream)
 
 
 running = True
@@ -637,27 +697,33 @@ while running:
 
     now = time.time()
 
-    # --- MICROPHONE: (re)open if needed, then read one chunk ---
-    if stream is None and now - last_open_attempt >= OPEN_RETRY_S:
+    # --- MICROPHONE: (re)open if needed, then take what the reader thread got ---
+    if mic is None and now - last_open_attempt >= OPEN_RETRY_S:
         last_open_attempt = now
         stream = open_stream()
         perf.mark("mic_open_tried")  # PERF
         if stream is not None:
+            mic = MicReader(stream)
+            perf.frames.add("mic_dropped_chunks", 0)  # PERF
             last_level_send = now
 
     new_data = None
-    if stream is not None:
-        try:
-            # Blocks until CHUNK_READ frames are there: this paces the loop (~31 Hz)
-            raw_data = stream.read(CHUNK_READ, exception_on_overflow=False)
-            new_data = dsp.pick_channel(raw_data, CHANNELS, MIC_CHANNEL, CAPTURE_BITS)
-        except Exception as e:
+    if mic is not None:
+        # Waits for the first chunk (~32 ms of sound): this paces the loop at ~31 Hz.
+        # A slow frame does not wait: it gets all the chunks that came in meanwhile.
+        raw_data = mic.read_all(timeout=0.25)
+        if mic.error is not None:
             # Don't quit (the watchdog would blank the screen): reopen the mic instead.
-            print(f"Audio read error: {e}. Reopening the microphone...")
-            close_stream(stream)
-            stream = None
+            print(f"Audio read error: {mic.error}. Reopening the microphone...")
+            mic.close()
+            mic = None
             meter = None
             last_open_attempt = now
+        elif not raw_data:
+            continue  # No sound yet: keep the last image on the screen
+        else:
+            new_data = dsp.pick_channel(raw_data, CHANNELS, MIC_CHANNEL, CAPTURE_BITS)
+            perf.frames.add("mic_samples", len(new_data))  # PERF
 
     perf.frames.lap("mic_wait")  # PERF
     # Static layer = black background + legend (a plain copy, no blending)
@@ -852,13 +918,19 @@ while running:
     perf.frames.lap("draw")  # PERF
     pygame.display.flip()
     perf.frames.lap("flip")  # PERF
-    # With a mic, the blocking stream.read() already paces the loop (~31 Hz), so this
+    # With a mic, waiting for its next chunk already paces the loop (~31 Hz), so this
     # never waits. Without one, it keeps the "waiting" screen from spinning the CPU.
-    clock.tick(60 if stream is not None else 10)
+    clock.tick(60 if mic is not None else 10)
     perf.frames.lap("tick")  # PERF
     perf.frames.end()  # PERF
 
-if stream:
-    close_stream(stream)
-p.terminate()
-pygame.quit()
+# Fast exit: the kernel frees the mic, the screen and the Wayland connection when the
+# process ends. p.terminate() and pygame.quit() are skipped: they may be slow on a
+# Pi Zero 2, and the orchestrator force-kills a mode still running after 2 s.
+perf.mark("loop_exited")  # PERF
+if mic is not None:
+    mic.close()
+perf.mark("mic_closed")  # PERF
+sys.stdout.flush()
+sys.stderr.flush()
+os._exit(0)
