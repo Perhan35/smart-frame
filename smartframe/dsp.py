@@ -18,6 +18,9 @@ import numpy as np
 FAST_TAU = 0.125  # IEC 61672 "FAST" time weighting, in seconds (same for rise and fall)
 REACTIVE_RELEASE_TAU = 0.08  # Screen only: instant attack, 80 ms release
 FRAME_SIZE = 2048  # Samples per analysis frame (43 ms at 48 kHz); hop is half of it
+# Z-weighting ("flat") still needs a band: IEC 61672 uses 10 Hz - 20 kHz. Without it,
+# DC drift and ultrasonic noise up to Nyquist (24 kHz at 48 kHz) would be counted.
+Z_BAND_HZ = (10.0, 20000.0)
 # Noise floor subtraction never lowers a reading by more than this (avoids log(0)).
 # Readings far below the configured floor are indicative only.
 MAX_FLOOR_REDUCTION_DB = 10.0
@@ -134,7 +137,8 @@ class LevelMeter:
         norm = 1.0 / (self.n * self.hop)
         self._w_a = bin_weights * a_weighting_gains(self.rate, self.n) ** 2 * norm
         z = bin_weights.copy()
-        z[0] = 0.0  # Drop DC (mic offset)
+        freqs = np.fft.rfftfreq(self.n, 1.0 / self.rate)
+        z[(freqs < Z_BAND_HZ[0]) | (freqs > Z_BAND_HZ[1])] = 0.0  # Also drops DC (mic offset)
         self._w_z = z * norm
 
         frame_dt = self.hop / self.rate
@@ -161,6 +165,9 @@ class LevelMeter:
             return
         count = (len(buf) - self.n) // self.hop + 1
         frames = np.lib.stride_tricks.sliding_window_view(buf, self.n)[:: self.hop][:count]
+        # Remove each frame's mean first: a DC offset would otherwise leak through the
+        # window into the lowest bins (inside the Z band).
+        frames = frames - frames.mean(axis=1, keepdims=True)
         spectrum = np.fft.rfft(frames * self.window, axis=1)
         power = spectrum.real**2 + spectrum.imag**2
         for ms_a, ms_z in zip(power @ self._w_a, power @ self._w_z):

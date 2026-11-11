@@ -36,6 +36,13 @@ def _log(msg):
     print(f"[PERF] {_tag}: {msg}", flush=True)
 
 
+def refresh_from_env():
+    """For a process started ahead of time (audio.preload), once it gets its real
+    environment: label its lines with the mode switch it now serves."""
+    global _tag
+    _tag = os.path.basename(os.environ.get("SMARTFRAME_PERF_TAG", "") or "main")
+
+
 def begin_switch(mode):
     """Start timing a mode switch. Child processes inherit the start time."""
     if not ENABLED:

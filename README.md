@@ -96,7 +96,7 @@ sudo swapon --priority 10 /swapfile
 echo '/swapfile none swap sw,pri=10 0 0' | sudo tee -a /etc/fstab
 ```
 
-SmartFrame automatically detects the GPU state and will enable hardware-accelerated 2D canvas and GLES2 rendering if available.
+GPU use: the audio mode asks SDL2 for its GLES2 renderer when the Pi has a GPU (`/dev/dri`), and the Mirror mode's main browser (Cog, WPE WebKit) renders with the GPU. The fallback browser (Chromium) runs with `--disable-gpu`: no GL backend works with it on the Pi's `vc4` driver, so it renders in software.
 
 ## SmartFrame Installation
 
@@ -124,6 +124,8 @@ The setup script creates `config.yaml` from `config.example.yaml` automatically.
 - **MagicMirror**: Set the URL corresponding to your local MagicMirror instance.
 - **Screen**: `screen_size` (e.g. `"1920x1080"`) is the size the Mirror browser starts with. The audio screen uses the real screen size and scales its layout.
 - **`keep_compositor_when_off`**: `true` keeps the compositor (labwc) running in `off` mode, with the screen switched off. The next mode then starts without the 6-8 s cold start, but some RAM stays in use. Default `false`.
+- **`restore_display_settings_on_power_on`**: `true` (default) sends the saved brightness, contrast and color profile again each time the screen turns on. If your screen keeps its settings while off, `false` makes switching on faster (fewer DDC/CI commands), but changes made with the screen's own buttons are then no longer undone.
+- Invalid values in `config.yaml` (a word instead of a number, an unknown mode...) never stop the frame: they are replaced by their default, with a warning in the log (`journalctl -u smartframe`).
 - **Audio Mode**:
   - `threshold_db_warning`: Volume (in dB) where the dB text will turn yellow/orange (default: 60).
   - `threshold_db_error`: Volume (in dB) where the dB text will turn red (default: 85).
@@ -134,6 +136,9 @@ The setup script creates `config.yaml` from `config.example.yaml` automatically.
   - `calibration_slope`: (Optional) second calibration point. `1.0` = offset only.
   - `noise_floor_dba`: (Optional) the mic's own noise in dBA, removed from every reading in energy. Set it **after** calibrating, either with `scripts/measure_noise_floor.py` (stop the service first, measure in a very quiet room) or with the INMP441 datasheet value (about 33). Leave it empty for no correction.
   - `show_debug`: `true` (default) shows the CPU stats and the "FAST RESPONSE | SLOPE" line on the audio screen. `false` hides them.
+  - `theme`: `"neon"` (default, colors on black) or `"eink"` (ink on paper, monochrome, for the e-ink look). Both use the Barlow font shipped in `assets/fonts/`.
+  - `pixel_shift_minutes`: every this many minutes, the whole audio screen moves by a few pixels, so the legend and the numbers do not mark an IPS screen left on all day. Default `10`, `0` turns it off.
+  - `preload`: `true` keeps an audio mode process ready in the background (Python, pygame and numpy already loaded) while another mode or `off` is shown. Switching to `audio` is then faster, but that process uses RAM all the time (check with `scripts/perf_report.sh` before keeping it on a Pi Zero 2). Default `false`.
   - `render_scale`: `1.0` (default) draws at the screen's resolution. Lower values draw the bars and the curve smaller and let the GPU scale them up with smoothing, while the text and the legend stay at full resolution (sharp): `0.75` is a good balance (about half the pixels), `0.5` uses the least CPU. Without a usable GPU renderer, the whole image (text included) is scaled.
 
 ### Sound level: what the numbers mean
@@ -169,6 +174,24 @@ Manual startup:
 source .venv/bin/activate
 python3 main.py
 ```
+
+### Going back to a known good version
+
+Before trying something new on the Pi, mark the version that works:
+
+```bash
+git tag -f stable          # -f moves the tag if it already exists
+```
+
+If an update goes wrong, go back to it, then restart the service:
+
+```bash
+git checkout stable
+./scripts/install_service.sh   # Only if the service file changed
+sudo systemctl restart smartframe
+```
+
+`git checkout main` (then `git pull`) returns to the latest version. The tag stays on the Pi: no need to push it.
 
 ### Service Installation / Update (Start on Boot)
 
@@ -226,10 +249,11 @@ SmartFrame is designed to stay safe on an untrusted local network.
   user homeassistant
   topic readwrite #
 
-  # The frame can only use its own topics and publish discovery
+  # The frame can only use its own topics, publish discovery, and know when HA restarts
   user smartframe
   topic readwrite smartframe/#
   topic write homeassistant/#
+  topic read homeassistant/status
   ```
 
   **Warning:** once an `acl_file` is set, any user not listed in it gets no access at all. List every MQTT user you use (Home Assistant, other devices), or they will stop working. If your broker is managed by a Home Assistant add-on, configure ACLs the way that add-on documents.
@@ -242,6 +266,10 @@ SmartFrame is designed to stay safe on an untrusted local network.
 
   *Optional hardening:* Raspberry Pi OS gives the default user passwordless `sudo` for everything (file in `/etc/sudoers.d/`). SmartFrame no longer needs it. Removing it limits the damage of any bug, but **make sure you know your user password first**, or you will lose `sudo` access.
 
+## Credits
+
+The audio screen uses the [Barlow](https://github.com/jpt/barlow) font, by The Barlow Project Authors, under the SIL Open Font License 1.1 (`assets/fonts/OFL.txt`).
+
 ## Performance & Persistent Caching
 
 To ensure maximum responsiveness on the Pi Zero 2 WH, SmartFrame uses an advanced multi-layer caching system:
@@ -249,7 +277,7 @@ To ensure maximum responsiveness on the Pi Zero 2 WH, SmartFrame uses an advance
 1. **Hardware Discovery Cache**: Remembers which power command (DDC or CEC) and which HDMI port (`HDMI-1`) works for your setup, skipping slow scans on boot.
 2. **Self-Configuring Audio**: The orchestrator scans for the best microphone on the first run. It caches the device index and name in `.smartframe_cache`, eliminating the 1-2 second delay when switching to Audio Mode. If the sound cards are renumbered (e.g. a USB device plugged in), the microphone is found again by name.
 3. **Persistent Browser Profiles**: Both **Chromium** and **Cog** use persistent data directories (`.chromium_profile/` and `.cog_profile/`). This ensures that MagicMirror assets are cached locally.
-4. **Binary Path Caching**: Remembers the exact location of tool binaries to eliminate redundant `which` shell calls.
+4. **No stale binary paths**: tool binaries (such as `labwc`) are looked up on `PATH` each time, in-process (no `which` subprocess). A path is never read back from the cache file and run.
 
 ## Home Assistant Integration
 
@@ -264,8 +292,14 @@ SmartFrame natively supports **Home Assistant MQTT Auto-Discovery**. Once connec
 | **SmartFrame Input** | `select` | Switch monitor input source (HDMI-1, HDMI-2, etc.). |
 | **SmartFrame Ambient Sound** | `sensor` | Sound level (LAeq of each second, dBA), with long-term statistics. |
 | **SmartFrame Run State** | `sensor` (diagnostic) | What the mode really does: `off`, `starting`, `running`, `retrying` (crashed, relaunch planned), `failed` (gave up, switched off). |
+| **SmartFrame Sound Peak** | `sensor` (diagnostic) | LAFmax: loudest moment of each second (dBA). **Disabled by default** (it doubles the sound values stored by HA): enable it in HA if you want it. |
+| **SmartFrame CPU Temperature** | `sensor` (diagnostic) | Pi CPU temperature (°C), read every minute, sent when it changes by 0.5 °C. |
+| **SmartFrame Started** | `sensor` (diagnostic) | When the service started: HA shows it as "3 hours ago" (uptime). |
+| **SmartFrame Restart** | `button` (diagnostic) | Restarts the SmartFrame service. It stops its modes and exits with code 75, and systemd (`Restart=on-failure`) starts it again about 10 s later. Only works when run as the service. |
 
 The mode selector shows your choice immediately; **Run State** tells whether that mode actually runs.
+
+States are published (retained) when they change, not on a timer. When Home Assistant restarts, it publishes `online` on `homeassistant/status`, and the frame sends its discovery and states again.
 
 Every ID contains the device ID (hostname by default), so several frames can share one broker. **Upgrading from a version with fixed IDs:** the frame removes its old entities and creates new ones with the same names, which normally get the same entity IDs (dashboards and automations keep working). Check that the device's area and any customised names are still set, and update any automation that publishes directly to the old `smartframe/...` topics.
 
@@ -280,6 +314,9 @@ The orchestrator uses the following topics for integration with other systems (e
 - `smartframe/<id>/set_color_preset` / `smartframe/<id>/color_preset_state`
 - `smartframe/<id>/set_input_source` / `smartframe/<id>/input_source_state`
 - `smartframe/<id>/audio/dba` (sound level, LAeq of each second)
+- `smartframe/<id>/audio/lafmax` (loudest moment of each second)
+- `smartframe/<id>/cpu_temp` / `smartframe/<id>/started` (diagnostics)
+- `smartframe/<id>/restart` (send `PRESS` to restart the service)
 - `smartframe/<id>/status` (LWT: `online`/`offline`)
 - `smartframe/<id>/modes_available` (JSON list of modes)
 

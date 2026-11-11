@@ -38,6 +38,10 @@ LEGACY_TOPIC_DEFAULTS = {
     "input_source_state_topic": "smartframe/input_source_state",
 }
 
+# Keys that older versions had in config.example.yaml and that nothing reads any more:
+# left in config.yaml (harmless), but not listed as "unknown" after every git pull.
+OBSOLETE_KEYS = frozenset({"audio.microphone"})
+
 _TOP_KEY = re.compile(r"^([A-Za-z_][\w-]*)\s*:")
 _CHILD_KEY = re.compile(r"^  ([A-Za-z_][\w-]*)\s*:")
 
@@ -64,7 +68,8 @@ def find_unknown(config: dict, reference: dict, prefix: str = "") -> list[str]:
     for key, value in config.items():
         full_key = f"{prefix}.{key}" if prefix else key
         if key not in reference:
-            unknown.append(full_key)
+            if full_key not in OBSOLETE_KEYS:
+                unknown.append(full_key)
         elif isinstance(value, dict) and isinstance(reference[key], dict):
             unknown.extend(find_unknown(value, reference[key], full_key))
     return unknown

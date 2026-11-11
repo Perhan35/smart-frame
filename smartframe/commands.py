@@ -13,7 +13,7 @@ def parse_command(cmd, payload, modes):
     """Payload of a command topic -> (cmd, value), or None if the value is invalid.
 
     `cmd` is the command bound to the topic: "mode", "brightness", "contrast",
-    "color_preset" or "input_source". `payload` is the raw MQTT payload (bytes);
+    "color_preset", "input_source" or "service_restart" (HA button: "PRESS"). `payload` is the raw MQTT payload (bytes);
     invalid UTF-8 never raises.
     """
     if isinstance(payload, (bytes, bytearray)):
@@ -32,6 +32,8 @@ def parse_command(cmd, payload, modes):
         return cmd, max(0, min(100, value))
     if cmd in ("color_preset", "input_source"):
         return (cmd, text) if text else None  # Names are matched exactly (case kept)
+    if cmd == "service_restart":
+        return (cmd, None) if text.upper() in ("PRESS", "RESTART") else None
     return None
 
 

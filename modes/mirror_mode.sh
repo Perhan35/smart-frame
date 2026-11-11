@@ -96,9 +96,11 @@ if [ "$BROWSER_TYPE" = "cog" ]; then
     #   --enable-page-cache=false  Disable in-memory back/forward cache to save RAM on 512MB device
     COG_FLAGS="--platform=wl --webprocess-failure=restart --bg-color=black --enable-page-cache=false"
 
-    # Conditional logging for debugging (only Cog core messages: load events, errors, warnings)
+    # Conditional logging for debugging: Cog core messages (load events, errors, warnings)
+    # and the page's console messages (MagicMirror logs, JavaScript errors) in the journal
     if [ "$SMARTFRAME_DEBUG" = "1" ]; then
         export G_MESSAGES_DEBUG="Cog-Core"
+        COG_FLAGS="$COG_FLAGS --enable-write-console-messages-to-stdout=true"
     fi
 
     LAUNCH_WRAPPER="nice -n 0 ionice -c 2 -n 4"

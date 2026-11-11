@@ -12,6 +12,10 @@ mqtt:
   run_state_topic: "smartframe/{device_id}/run_state" # off / starting / running / retrying / failed
   available_modes_topic: "smartframe/{device_id}/modes_available"
   dba_state_topic: "smartframe/{device_id}/audio/dba" # LAeq: average sound level of each second
+  lafmax_state_topic: "smartframe/{device_id}/audio/lafmax" # LAFmax: loudest moment of each second
+  cpu_temp_state_topic: "smartframe/{device_id}/cpu_temp"
+  started_state_topic: "smartframe/{device_id}/started" # When the service started (HA shows the uptime)
+  restart_topic: "smartframe/{device_id}/restart" # HA "Restart" button
   brightness_topic: "smartframe/{device_id}/set_brightness"
   brightness_state_topic: "smartframe/{device_id}/brightness_state"
   contrast_topic: "smartframe/{device_id}/set_contrast"
@@ -26,12 +30,12 @@ debug: false # Set to true to see all browser and subprocess output in the termi
 default_mode: "off" # Possible values: "audio", "mirror", or "off"
 screen_size: "1920x1080" # Screen resolution, used by the Mirror browser for its first frame
 keep_compositor_when_off: false # true = faster switch from "off" (no 6-8 s cold start), uses some RAM all the time
+restore_display_settings_on_power_on: true # Send brightness/contrast/color again when the screen turns on. false = faster, if your screen keeps them
 
 magic_mirror:
   url: "http(s)://[MAGIC_MIRROR_SERVER_IP_ADDRESS]:[PORT]" # Replace with your MagicMirror server URL
 
 audio:
-  microphone: "I2S" # Configured via OS (ALSA)
   device_index: null # Change to an integer if you need to select a specific microphone index
   mic_channel: "left" # "left" if the mic's L/R pin goes to GND (see wiring), "right" if it goes to 3.3V
   capture_bits: 16 # 32 keeps the mic's full 24-bit resolution (same calibration); 16 if your driver refuses 32
@@ -41,4 +45,7 @@ audio:
   calibration_slope: 1.0 # Optional 2nd calibration point (see README). 1.0 = offset only
   noise_floor_dba: null # Mic self-noise in dBA, removed from quiet readings. Set it after calibrating: scripts/measure_noise_floor.py, or ~33 (INMP441 datasheet)
   show_debug: true # CPU stats and "FAST RESPONSE | SLOPE" on the audio screen
+  theme: "neon" # "neon" (colors on black) or "eink" (ink on paper, monochrome)
+  pixel_shift_minutes: 10 # Move the picture a few pixels this often, against screen burn-in. 0 = never
+  preload: false # true = keep the audio mode ready in the background: faster switch to "audio", uses RAM all the time
   render_scale: 1.0 # < 1 = draw the bars smaller and let the GPU scale them up (smoothed); text stays sharp. 0.75 = good balance, 0.5 = least CPU

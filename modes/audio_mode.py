@@ -3,6 +3,7 @@ import numpy as np
 import pyaudio
 import sys
 import os
+import json
 import yaml
 import ctypes
 import signal
@@ -16,7 +17,23 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."
 from smartframe import dsp  # noqa: E402
 from smartframe import perf  # noqa: E402  # PERF
 from smartframe.audio_input import pa_format, resolve_device  # noqa: E402
+from smartframe import config_check  # noqa: E402
 perf.mark("imports_done")  # PERF
+
+# --- PRELOAD (audio.preload) ---
+# Started ahead of time by the orchestrator: the slow imports above are done. Wait
+# here, without touching the screen or the mic, for the start signal: one line on
+# stdin with the environment to run with (display, mic index...). EOF = not needed.
+if os.environ.get("SMARTFRAME_PRELOAD") == "1":
+    start_line = sys.stdin.readline()
+    if not start_line:
+        os._exit(0)
+    keep = {k: os.environ[k] for k in ("SMARTFRAME_LEVEL_FD",) if k in os.environ}
+    os.environ.clear()
+    os.environ.update(json.loads(start_line))
+    os.environ.update(keep)  # Our end of the level pipe, opened when we were started
+    perf.refresh_from_env()  # PERF
+    perf.mark("preload_started")  # PERF
 
 # Load configuration
 config_path = os.path.join(os.path.dirname(__file__), "..", "config.yaml")
@@ -30,11 +47,14 @@ CAPTURE_BITS = 16
 MIC_CHANNEL = 0
 SHOW_DEBUG = True  # CPU stats + "FAST RESPONSE | SLOPE" badge
 RENDER_SCALE = 1.0  # < 1: draw at a lower resolution and let SDL scale it up
+THEME_NAME = "neon"
+PIXEL_SHIFT_MINUTES = 10.0  # Move the whole picture a few pixels this often (0 = never)
 
 try:
     if os.path.exists(config_path):
         with open(config_path, "r") as file:
-            config = yaml.safe_load(file) or {}
+            # Invalid values are dropped (defaults used); main.py logs the warnings.
+            config, _ = config_check.check(yaml.safe_load(file))
             audio_config = config.get("audio") or {}
             THRESHOLD_WARNING = audio_config.get("threshold_db_warning", 60)
             THRESHOLD_ERROR = audio_config.get("threshold_db_error", 85)
@@ -44,6 +64,9 @@ try:
             DEVICE_INDEX = audio_config.get("device_index")
             SHOW_DEBUG = bool(audio_config.get("show_debug", True))
             RENDER_SCALE = min(1.0, max(0.25, float(audio_config.get("render_scale") or 1.0)))
+            THEME_NAME = str(audio_config.get("theme") or "neon").strip().lower()
+            shift = audio_config.get("pixel_shift_minutes")
+            PIXEL_SHIFT_MINUTES = 10.0 if shift is None else float(shift)
 except Exception as e:
     print(f"Warning: could not read config.yaml ({e}). Using defaults.")
 
@@ -78,15 +101,74 @@ def send_levels(levels):
         level_pipe = None  # Orchestrator gone
 
 
+# --- THEMES (audio.theme) ---
+# Every color of the screen. Bars are drawn opaque, already blended with the
+# background at "bar_alpha" (same look as transparency, without blending a surface).
+_INK = (34, 34, 34)
+_PAPER = (232, 229, 222)
+THEMES = {
+    # Neon spectrum on black (the original look)
+    "neon": {
+        "background": (0, 0, 0),
+        "bands": None,  # None: the frequency gradient (_COLOR_WAYPOINTS below)
+        "ranges": None,  # None: each range's own color (FREQ_RANGES)
+        "curve": None,  # None: the bar colors
+        "bar_alpha": 140 / 255.0,
+        "peak_bar": (234, 234, 234),
+        "peak_mark": (255, 255, 255),
+        "glow": (40, 40, 40),
+        "label": (130, 150, 130),
+        "tick": (60, 80, 60),
+        "text": (180, 255, 180),
+        "warning": (255, 180, 50),
+        "error": (255, 80, 80),
+        "dbz": (180, 210, 180),
+        "stats": (110, 130, 110),
+        "hot": (220, 80, 80),  # CPU temperature above 75 °C
+        "badge": (110, 135, 110),
+        "waiting": (120, 120, 120),
+        "icon": (100, 100, 100),
+        "icon_slash": (255, 50, 50),
+    },
+    # Ink on paper: calm and monochrome, for a matte screen that imitates e-ink
+    "eink": {
+        "background": _PAPER,
+        "bands": _INK,
+        "ranges": (120, 118, 112),
+        "curve": _INK,
+        "bar_alpha": 0.5,
+        "peak_bar": _INK,
+        "peak_mark": _INK,
+        "glow": (205, 202, 195),
+        "label": (110, 108, 102),
+        "tick": (160, 157, 150),
+        "text": _INK,
+        "warning": (150, 85, 10),
+        "error": (165, 35, 35),
+        "dbz": (90, 88, 84),
+        "stats": (140, 137, 130),
+        "hot": (165, 35, 35),
+        "badge": (140, 137, 130),
+        "waiting": (120, 118, 112),
+        "icon": (150, 147, 140),
+        "icon_slash": (165, 35, 35),
+    },
+}
+if THEME_NAME not in THEMES:
+    print(f"Unknown theme {THEME_NAME!r}: using 'neon'. Themes: {', '.join(THEMES)}")
+    THEME_NAME = "neon"
+THEME = THEMES[THEME_NAME]
+BACKGROUND = THEME["background"]
+
 # Audio Configuration (Ideal Balancing for Zero 2 WH)
 CHUNK_READ = 1536  # Optimized speed (~31Hz updates)
 FFT_SIZE = 8192  # High-fidelity 8k FFT for maximum visual resolution
 FFT_EVERY = 2  # Big FFT on 1 frame out of 2 (~15 Hz): the bars smooth in between
 FORMAT = pa_format(CAPTURE_BITS)
 OPEN_RETRY_S = 3.0  # Retry opening the mic this often (it may still be held)
-# Set from the device when the stream opens (see open_stream)
-CHANNELS = 1
-SAMPLE_RATE = 48000
+# Format of the open stream: set from the device by open_stream()
+stream_channels = 1
+stream_rate = 48000
 
 
 @contextmanager
@@ -186,8 +268,8 @@ def _open_screen():
 class GpuLayers:
     """Sharp text over smooth bars: the GPU stacks three layers on every frame.
 
-    1. The canvas (bars, peaks, glow, curve): drawn at render_scale on an opaque black
-       surface and stretched to the screen with smoothing. Only the parts that changed
+    1. The canvas (bars, peaks, glow, curve): drawn at render_scale on an opaque
+       surface (theme background) and stretched to the screen with smoothing. Only the parts that changed
        are sent to the GPU.
     2. The legend band under the bars: drawn once, at full resolution.
     3. Texts and icons: each one its own full-resolution texture, drawn 1:1 (sharp).
@@ -209,7 +291,7 @@ class GpuLayers:
                 print(f"Warning: GPU output is {output}, not {tuple(full_size)}: text is scaled.")
             self.renderer.logical_size = full_size
             self.canvas = pygame.Surface(canvas_size)
-            self.canvas.fill((0, 0, 0))
+            self.canvas.fill(BACKGROUND)
             self.canvas_rect = self.canvas.get_rect()
             self.canvas_texture = Texture(self.renderer, canvas_size, streaming=True)
             self.canvas_texture.update(self.canvas)
@@ -429,7 +511,7 @@ def build_rate_tables(sample_rate):
     _nyquist_mask = freqs > 22500  # Nyquist cleanup mask
 
 
-build_rate_tables(SAMPLE_RATE)
+build_rate_tables(stream_rate)
 
 bar_heights = np.zeros(NUM_BANDS)
 peak_heights = np.zeros(NUM_BANDS)
@@ -479,6 +561,10 @@ for _fc in band_centers:
             )
             break
     band_colors.append(_c)
+if THEME["bands"] is not None:
+    band_colors = [THEME["bands"]] * NUM_BANDS
+# One color for the whole curve (eink), or None: each segment takes its band's color
+CURVE_COLOR = THEME["curve"]
 
 # Per-band noise gate thresholds (compensates for visual tilt + HF boost)
 # Without this, the tilt/boost inflates the high-frequency noise floor above
@@ -511,19 +597,13 @@ def px(value):
 
 
 analyzer_height = screen.get_height() // 2 + px(80)
-analyzer_y_bottom = screen.get_height() - px(150)
+BASE_ANALYZER_Y_BOTTOM = screen.get_height() - px(150)
 bar_spacing = px(3)  # Tighter spacing for higher density
 total_bars_width = screen.get_width() - px(100)
 bar_width = max(1, (total_bars_width // NUM_BANDS) - bar_spacing)
-start_x = (screen.get_width() - (NUM_BANDS * (bar_width + bar_spacing))) // 2
-curve_x = [start_x + i * (bar_width + bar_spacing) + (bar_width // 2) for i in range(NUM_BANDS)]
+BASE_START_X = (screen.get_width() - (NUM_BANDS * (bar_width + bar_spacing))) // 2
 
-# Bars are drawn opaque on the black background with their colors already scaled
-# by the old alpha (140/255): same look as alpha blending, without blending a full
-# screen surface every frame.
-BAR_ALPHA = 140 / 255.0
-PEAK_BAR_COLOR = (234, 234, 234)  # White at alpha 230 over the glow
-GLOW_COLOR = (40, 40, 40)  # White at alpha 40 over black
+BAR_ALPHA = THEME["bar_alpha"]
 
 # Texts, icons and the legend have their own size: the full screen with the GPU
 # layers (sharp at any render_scale), the drawing surface otherwise.
@@ -537,10 +617,54 @@ def tpx(value):
     return max(1, int(round(value * TEXT_SCALE)))
 
 
+# --- PIXEL SHIFT (audio.pixel_shift_minutes) ---
+# The legend and the numbers never move: on an IPS screen left on all day they may
+# leave a faint mark. Every few minutes the whole picture moves to the next position
+# of this small square, PIXEL_SHIFT_STEP 1080p-pixels apart (not visible from afar).
+PIXEL_SHIFT_STEP = 4
+PIXEL_SHIFT_PATTERN = [(0, 0), (1, 0), (1, 1), (0, 1), (-1, 1), (-1, 0), (-1, -1), (0, -1), (1, -1)]
+shift_x = shift_y = 0  # Text pixels
+start_x = BASE_START_X
+analyzer_y_bottom = BASE_ANALYZER_Y_BOTTOM
+curve_x = []
+
+
+def set_layout_shift(step):
+    """Move everything to position `step` of PIXEL_SHIFT_PATTERN. The caller then
+    rebuilds the legend and wipes the whole screen."""
+    global shift_x, shift_y, start_x, analyzer_y_bottom, curve_x
+    dx, dy = PIXEL_SHIFT_PATTERN[step % len(PIXEL_SHIFT_PATTERN)]
+    shift_x = int(round(dx * PIXEL_SHIFT_STEP * TEXT_SCALE))
+    shift_y = int(round(dy * PIXEL_SHIFT_STEP * TEXT_SCALE))
+    start_x = BASE_START_X + int(round(dx * PIXEL_SHIFT_STEP * UI_SCALE))
+    analyzer_y_bottom = BASE_ANALYZER_Y_BOTTOM + int(round(dy * PIXEL_SHIFT_STEP * UI_SCALE))
+    curve_x = [start_x + i * (bar_width + bar_spacing) + (bar_width // 2) for i in range(NUM_BANDS)]
+
+
+set_layout_shift(0)
+
+# Fonts shipped in assets/fonts (Barlow, SIL Open Font License): the same look on
+# every Pi. pygame's default font is the fallback if they are missing.
+FONT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "assets", "fonts")
+# Sizes are given in pygame default-font units (it renders at 0.6875 x the asked
+# size); FONT_SCALE gives Barlow about the same height, so the layout stays put.
+FONT_SCALE = 0.6875 * 1.0
+
+
+def load_font(size, bold=False):
+    """Bundled font at a 1080p size (text pixels), or pygame's default font."""
+    path = os.path.join(FONT_DIR, "Barlow-SemiBold.ttf" if bold else "Barlow-Regular.ttf")
+    try:
+        return pygame.font.Font(path, tpx(size * FONT_SCALE))
+    except (pygame.error, OSError) as e:
+        print(f"Font {path} unavailable ({e}): using pygame's default font.")
+        return pygame.font.Font(None, tpx(size))
+
+
 MARGIN = tpx(50)
-font_extra_large = pygame.font.Font(None, tpx(220))
-font_medium = pygame.font.Font(None, tpx(80))
-font_tiny = pygame.font.Font(None, tpx(25))
+font_extra_large = load_font(220, bold=True)
+font_medium = load_font(80)
+font_tiny = load_font(25)
 
 _text_cache = {}
 
@@ -572,7 +696,7 @@ def build_static_layer(size, top=0):
     layer = pygame.Surface(size)
     if gpu is None:
         layer = layer.convert()  # Needs the classic display
-    layer.fill((0, 0, 0))
+    layer.fill(BACKGROUND)
     bottom = analyzer_y_bottom * TEXT_K - top  # Bottom of the bars, in this layer
 
     # Labels for key frequencies
@@ -580,10 +704,10 @@ def build_static_layer(size, top=0):
         if MIN_FREQ <= f <= MAX_FREQ:
             label_x = _freq_to_x(f) * TEXT_K
             label_text = f"{int(f / 1000)}k" if f >= 1000 else f"{f}"
-            label_surface = font_tiny.render(label_text, True, (130, 150, 130))
+            label_surface = font_tiny.render(label_text, True, THEME["label"])
             layer.blit(label_surface, label_surface.get_rect(midtop=(label_x, bottom + tpx(15))))
             pygame.draw.line(
-                layer, (60, 80, 60),
+                layer, THEME["tick"],
                 (label_x, bottom + tpx(2)), (label_x, bottom + tpx(10)), 1,
             )
 
@@ -593,7 +717,7 @@ def build_static_layer(size, top=0):
             x_start = _freq_to_x(max(rng["min"], MIN_FREQ)) * TEXT_K
             x_end = _freq_to_x(min(rng["max"], MAX_FREQ)) * TEXT_K
             level_y = bottom + tpx(50) + (rng["level"] * tpx(40))
-            line_color = rng["color"]
+            line_color = THEME["ranges"] or rng["color"]
             pygame.draw.line(layer, line_color, (x_start + 2, level_y), (x_end - 2, level_y), tpx(2))
             pygame.draw.line(layer, line_color, (x_start + 2, level_y - tpx(5)), (x_start + 2, level_y + tpx(5)), 1)
             pygame.draw.line(layer, line_color, (x_end - 2, level_y - tpx(5)), (x_end - 2, level_y + tpx(5)), 1)
@@ -609,27 +733,34 @@ def build_no_mic_icon():
     """Stylized "No Mic" icon (drawn at 100x100, scaled to the screen)."""
     icon = pygame.Surface((100, 100), pygame.SRCALPHA)
     # Mic body (rounded rect) and stand
-    pygame.draw.rect(icon, (100, 100, 100), (35, 20, 30, 45), border_radius=15)
-    pygame.draw.line(icon, (100, 100, 100), (50, 65), (50, 80), 3)
-    pygame.draw.line(icon, (100, 100, 100), (35, 80), (65, 80), 3)
+    pygame.draw.rect(icon, THEME["icon"], (35, 20, 30, 45), border_radius=15)
+    pygame.draw.line(icon, THEME["icon"], (50, 65), (50, 80), 3)
+    pygame.draw.line(icon, THEME["icon"], (35, 80), (65, 80), 3)
     # The warning slash (red)
-    pygame.draw.line(icon, (255, 50, 50), (20, 20), (80, 80), 6)
+    pygame.draw.line(icon, THEME["icon_slash"], (20, 20), (80, 80), 6)
     if tpx(100) != 100:
         icon = pygame.transform.smoothscale(icon, (tpx(100), tpx(100)))
     return icon
 
 
+def build_legend():
+    """(Re)draw the legend at the current position (startup and each pixel shift)."""
+    global static_layer
+    if gpu is None:
+        static_layer = build_static_layer(screen.get_size())
+    else:
+        # The legend band starts just under the bars (they never reach it), and is
+        # drawn over the canvas, opaque, at full resolution.
+        legend_top = int((analyzer_y_bottom + px(2)) * TEXT_K)
+        gpu.set_legend(build_static_layer((TEXT_W, TEXT_H - legend_top), legend_top), (0, legend_top))
+
+
 perf.mark("display_ready")  # PERF
-if gpu is None:
-    static_layer = build_static_layer(screen.get_size())
-else:
-    # The legend band starts just under the bars (they never reach it), and is drawn
-    # over the canvas, opaque, at full resolution.
-    _legend_top = int((analyzer_y_bottom + px(2)) * TEXT_K)
-    gpu.set_legend(build_static_layer((TEXT_W, TEXT_H - _legend_top), _legend_top), (0, _legend_top))
+static_layer = None
+build_legend()
 no_mic_icon = build_no_mic_icon()
 slope_info = f"{SLOPE_DB_PER_OCTAVE}dB SL" if SLOPE_DB_PER_OCTAVE != 0 else "RAW"
-badge_surface = font_tiny.render(f"FAST RESPONSE | SLOPE: {slope_info}", True, (110, 135, 110))
+badge_surface = font_tiny.render(f"FAST RESPONSE | SLOPE: {slope_info}", True, THEME["badge"])
 
 # --- MICROPHONE STREAM ---
 MIC_QUEUE_CHUNKS = 64  # ~2 s of sound: if the screen stalls longer, the oldest is dropped
@@ -646,7 +777,7 @@ def open_stream():
     Returns the stream, or None (the caller retries every OPEN_RETRY_S seconds:
     the orchestrator may still hold the mic for a moment after a mode switch).
     """
-    global CHANNELS, SAMPLE_RATE, meter, last_open_error, open_attempts
+    global stream_channels, stream_rate, meter, last_open_error, open_attempts
     open_attempts += 1
     verbose = open_attempts == 1
     try:
@@ -654,11 +785,11 @@ def open_stream():
         if info is None:
             raise RuntimeError("No suitable audio input devices found with capture capabilities.")
         # Some I2S drivers only accept 2 channels for a mono mic: one is picked later.
-        CHANNELS, SAMPLE_RATE = dsp.input_format(info)
+        stream_channels, stream_rate = dsp.input_format(info)
         new_stream = p.open(
             format=FORMAT,
-            channels=CHANNELS,
-            rate=SAMPLE_RATE,
+            channels=stream_channels,
+            rate=stream_rate,
             input=True,
             input_device_index=index,
             frames_per_buffer=CHUNK_READ,
@@ -673,11 +804,11 @@ def open_stream():
             last_open_error = str(e)
         return None
 
-    print(f"Opening stream: {CHANNELS} channel(s), {SAMPLE_RATE}Hz, {CAPTURE_BITS}-bit, "
-          f"index {index}, using channel {MIC_CHANNEL if CHANNELS > 1 else 0}")
+    print(f"Opening stream: {stream_channels} channel(s), {stream_rate}Hz, {CAPTURE_BITS}-bit, "
+          f"index {index}, using channel {MIC_CHANNEL if stream_channels > 1 else 0}")
     last_open_error = None
-    meter = dsp.LevelMeter(SAMPLE_RATE, **METER_SETTINGS)
-    build_rate_tables(SAMPLE_RATE)
+    meter = dsp.LevelMeter(stream_rate, **METER_SETTINGS)
+    build_rate_tables(stream_rate)
     audio_buffer[:] = 0
     return new_stream
 
@@ -751,6 +882,8 @@ last_displayed_dba = 0
 last_displayed_dbz = 0
 last_level_send = time.time()
 frame_count = 0
+next_shift_at = 0.0  # 0: the first frame only schedules the first move
+shift_index = 0
 
 
 def signal_handler(sig, frame):
@@ -882,14 +1015,23 @@ while running:
         elif not raw_data:
             continue  # No sound yet: keep the last image on the screen
         else:
-            new_data = dsp.pick_channel(raw_data, CHANNELS, MIC_CHANNEL, CAPTURE_BITS)
+            new_data = dsp.pick_channel(raw_data, stream_channels, MIC_CHANNEL, CAPTURE_BITS)
             perf.frames.add("mic_samples", len(new_data))  # PERF
 
     perf.frames.lap("mic_wait")  # PERF
+    # Anti burn-in: move everything a few pixels now and then (full redraw)
+    if PIXEL_SHIFT_MINUTES > 0 and now >= next_shift_at:
+        if next_shift_at:
+            shift_index += 1
+            set_layout_shift(shift_index)
+            build_legend()
+            dirty_on_legend = None  # Forces a full wipe (and GPU upload) below
+        next_shift_at = now + PIXEL_SHIFT_MINUTES * 60
+
     # Wipe last frame's drawings: static layer (black + legend) with sound, plain
     # black on the "waiting" screen. A change of background wipes everything.
     on_legend = new_data is not None
-    # With the GPU layers the canvas is plain black (the legend is its own layer).
+    # With the GPU layers the canvas is plain background (the legend is its own layer).
     wipe_all = on_legend != dirty_on_legend
     if wipe_all:
         dirty_rects = [_screen_rect]
@@ -898,7 +1040,7 @@ while running:
         if on_legend and gpu is None:
             screen.blit(static_layer, rect, rect)
         else:
-            screen.fill((0, 0, 0), rect)
+            screen.fill(BACKGROUND, rect)
     wiped_rects, dirty_rects = dirty_rects, []
 
     perf.frames.lap("clear")  # PERF
@@ -918,11 +1060,9 @@ while running:
 
     if SHOW_DEBUG:
         # Render minimalist CPU stats (top-left, discreet)
-        stats_color = (110, 130, 110)  # Subtle technical green
-        if cpu_temp > 75:
-            stats_color = (220, 80, 80)  # Warning red for high temp
+        stats_color = THEME["hot"] if cpu_temp > 75 else THEME["stats"]
         stats_text = f"CPU {int(cpu_usage)}%  |  {cpu_temp:.1f}°C"
-        show(render_text(font_tiny, stats_text, stats_color), (MARGIN, MARGIN))
+        show(render_text(font_tiny, stats_text, stats_color), (MARGIN + shift_x, MARGIN + shift_y))
 
     if new_data is not None:
         # --- SOUND LEVEL (shared DSP, same math as the orchestrator) ---
@@ -1003,7 +1143,7 @@ while running:
             h = int(bar_heights[max_energy_idx] * analyzer_height)
             x = start_x + max_energy_idx * (bar_width + bar_spacing)
             pygame.draw.rect(
-                screen, GLOW_COLOR,
+                screen, THEME["glow"],
                 (x - px(4), analyzer_y_bottom - h - px(10), bar_width + px(8), h + px(10)),
                 border_radius=px(8),
             )
@@ -1017,12 +1157,14 @@ while running:
 
             if h > px(4):
                 if is_peak:
-                    color = PEAK_BAR_COLOR
+                    color = THEME["peak_bar"]
                 else:
-                    # Bar brightness based on height, pre-multiplied by the bar alpha
+                    # Bar strength based on height, blended over the background
                     k = (0.6 + 0.4 * bar_heights[i]) * BAR_ALPHA
                     c = band_colors[i]
-                    color = (int(c[0] * k), int(c[1] * k), int(c[2] * k))
+                    color = (int(BACKGROUND[0] + (c[0] - BACKGROUND[0]) * k),
+                             int(BACKGROUND[1] + (c[1] - BACKGROUND[1]) * k),
+                             int(BACKGROUND[2] + (c[2] - BACKGROUND[2]) * k))
                 pygame.draw.rect(
                     screen, color, (x, analyzer_y_bottom - h, bar_width, h), border_radius=px(4)
                 )
@@ -1031,57 +1173,63 @@ while running:
             if not is_peak and ph > px(5):
                 pygame.draw.rect(
                     screen,
-                    (255, 255, 255),
+                    THEME["peak_mark"],
                     (x, analyzer_y_bottom - ph - px(3), bar_width, px(2)),
                     border_radius=1,
                 )
 
-        # 3. The "High-Fidelity Curve" line (colors synchronized with the legend)
-        if len(curve_points) > 2:
-            for i in range(len(curve_points) - 1):
+        # 3. The "High-Fidelity Curve" line, plus a copy 1 px higher for a "thick" look
+        #    that keeps the antialiasing.
+        if CURVE_COLOR is not None:
+            # Single color (eink): the whole curve in 2 calls
+            pygame.draw.aalines(screen, CURVE_COLOR, False, curve_points)
+            pygame.draw.aalines(screen, CURVE_COLOR, False, [(x, y - 1) for x, y in curve_points])
+        else:
+            # Each segment in its band's color: a continuous gradient synchronized with
+            # the legend (~240 small calls; grouping them would show color steps).
+            for i in range(NUM_BANDS - 1):
                 p1 = curve_points[i]
                 p2 = curve_points[i + 1]
                 c = band_colors[i]
-                # Draw subtle anti-aliased segment
                 pygame.draw.aaline(screen, c, p1, p2)
-                # Draw a second slightly offset line for a 'thickness' feel without losing AA
                 pygame.draw.aaline(screen, c, (p1[0], p1[1] - 1), (p2[0], p2[1] - 1))
         dirty_rects.extend(analyzer_rects(np.maximum(np.maximum(bar_heights, peak_pos), curve_heights)))
 
         # Determine color based on threshold (Evaluate using dBA, professional standard)
-        text_color = (180, 255, 180)  # Brighter Green
+        text_color = THEME["text"]
         if last_displayed_dba >= THRESHOLD_ERROR:
-            text_color = (255, 80, 80)  # Vivid Red
+            text_color = THEME["error"]
         elif last_displayed_dba >= THRESHOLD_WARNING:
-            text_color = (255, 180, 50)  # Vivid Orange
+            text_color = THEME["warning"]
 
         # Render dBA text (Large, Integer only) — cached until the value changes
         dba_text = render_text(font_extra_large, f"{int(round(last_displayed_dba))} dBA", text_color)
         dba_rect = dba_text.get_rect()
-        dba_rect.topright = (TEXT_W - MARGIN, MARGIN)
+        dba_rect.topright = (TEXT_W - MARGIN + shift_x, MARGIN + shift_y)
         show(dba_text, dba_rect.topleft)
 
         # Render dBZ text (Medium)
-        dbz_text = render_text(font_medium, f"{last_displayed_dbz:.1f} dBZ", (180, 210, 180))
+        dbz_text = render_text(font_medium, f"{last_displayed_dbz:.1f} dBZ", THEME["dbz"])
         dbz_rect = dbz_text.get_rect()
-        dbz_rect.topright = (TEXT_W - MARGIN, dba_rect.bottom + tpx(10))
+        dbz_rect.topright = (dba_rect.right, dba_rect.bottom + tpx(10))
         show(dbz_text, dbz_rect.topleft)
 
         if SHOW_DEBUG:
             # "FAST RESPONSE" indicator (Tiny status info, pre-rendered)
             badge_rect = badge_surface.get_rect()
-            badge_rect.topright = (TEXT_W - MARGIN, dbz_rect.bottom + tpx(10))
+            badge_rect.topright = (dba_rect.right, dbz_rect.bottom + tpx(10))
             show(badge_surface, badge_rect.topleft)
     else:
-        # 1. The "No Mic" icon in the top-left corner
-        show(no_mic_icon, (MARGIN, MARGIN))
+        # 1. The "No Mic" icon in the top-left corner, below the CPU stats if shown
+        icon_y = MARGIN + shift_y + (font_tiny.get_linesize() + tpx(10) if SHOW_DEBUG else 0)
+        show(no_mic_icon, (MARGIN + shift_x, icon_y))
 
         # 2. Render localized error message
         error_text = render_text(
-            font_medium, "Waiting for I2S Microphone Signal...", (120, 120, 120)
+            font_medium, "Waiting for I2S Microphone Signal...", THEME["waiting"]
         )
         text_rect = error_text.get_rect(
-            center=(TEXT_W / 2, TEXT_H / 2)
+            center=(TEXT_W / 2 + shift_x, TEXT_H / 2 + shift_y)
         )
         show(error_text, text_rect.topleft)
 

@@ -50,3 +50,8 @@ def test_migrate_topics_only_old_defaults():
     assert "# old default" in new_text
     assert len(migrated) == 1
     assert config["mqtt"]["topic"] == "smartframe/{device_id}/set_mode"
+
+
+def test_obsolete_keys_are_not_reported():
+    config = {"audio": {"microphone": "I2S", "mine": 1}}
+    assert update_config.find_unknown(config, {"audio": {}}) == ["audio.mine"]

@@ -36,6 +36,18 @@ def test_1khz_sine_reads_its_rms_in_db():
     assert laeq(sine(1000, 1000), calibration_offset_db=0) == pytest.approx(60.0, abs=0.2)
 
 
+def dbz(samples):
+    meter = dsp.LevelMeter(RATE, calibration_offset_db=0)
+    meter.process(samples)  # Steady signal: every frame reads the same
+    return meter.reactive()[1]
+
+
+def test_dbz_is_limited_to_10_hz_20_khz():
+    assert dbz(sine(1000, 1000)) == pytest.approx(60.0, abs=0.2)
+    assert dbz(sine(22000, 1000)) < 0  # Ultrasonic: outside the Z band
+    assert dbz(np.full(RATE, 1000.0)) < 0  # DC offset of the mic
+
+
 def test_offset_is_added():
     assert laeq(sine(1000, 1000), calibration_offset_db=33) == pytest.approx(93.0, abs=0.2)
 

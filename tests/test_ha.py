@@ -1,7 +1,8 @@
 from smartframe import ha
 
 TOPICS = {k: f"smartframe/frame/{k}" for k in (
-    "command", "state", "status", "run_state", "dba", "brightness_cmd", "brightness_state",
+    "command", "state", "status", "run_state", "dba", "lafmax", "cpu_temp", "started", "restart",
+    "brightness_cmd", "brightness_state",
     "contrast_cmd", "contrast_state", "color_preset_cmd", "color_preset_state",
     "input_source_cmd", "input_source_state",
 )}
@@ -48,3 +49,13 @@ def test_payloads_point_to_this_frames_topics():
     run_state = next(p for t, p in _messages("living") if "/run_state/" in t)
     assert run_state["options"] == list(ha.RUN_STATES)
     assert run_state["entity_category"] == "diagnostic"
+
+
+def test_diagnostic_entities():
+    by_obj = {t.split("/")[-2]: (t, p) for t, p in _messages("living")}
+    for obj in ("lafmax", "cpu_temp", "started", "restart"):
+        assert by_obj[obj][1]["entity_category"] == "diagnostic"
+    assert by_obj["lafmax"][1]["enabled_by_default"] is False
+    assert by_obj["started"][1]["device_class"] == "timestamp"
+    assert by_obj["restart"][0] == "homeassistant/button/smartframe_living/restart/config"
+    assert by_obj["restart"][1]["command_topic"] == TOPICS["restart"]

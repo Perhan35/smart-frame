@@ -12,6 +12,13 @@ def test_parse_mode():
     assert parse_command("mode", b"disco", MODES) is None
 
 
+def test_parse_service_restart():
+    assert parse_command("service_restart", b"PRESS", MODES) == ("service_restart", None)
+    assert parse_command("service_restart", b"press ", MODES) == ("service_restart", None)
+    assert parse_command("service_restart", b"", MODES) is None
+    assert parse_command("service_restart", b"\xff", MODES) is None
+
+
 def test_parse_invalid_utf8_never_raises():
     assert parse_command("mode", b"\xff\xfe", MODES) is None
     assert parse_command("color_preset", b"\xff", MODES) == ("color_preset", "\ufffd")

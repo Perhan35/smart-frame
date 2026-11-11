@@ -50,9 +50,10 @@ def legacy_discovery_topics(prefix):
 def discovery_messages(prefix, dev_id, topics, modes, color_presets, input_sources):
     """[(topic, payload dict)] for every entity of this frame.
 
-    `topics` maps: command, state, status, run_state, dba, brightness_cmd,
-    brightness_state, contrast_cmd, contrast_state, color_preset_cmd,
-    color_preset_state, input_source_cmd, input_source_state.
+    `topics` maps: command, state, status, run_state, dba, lafmax, cpu_temp,
+    started, restart, brightness_cmd, brightness_state, contrast_cmd,
+    contrast_state, color_preset_cmd, color_preset_state, input_source_cmd,
+    input_source_state.
     Entity names are unchanged from older versions, so HA gives the new entities
     the same entity_id once the old ones are removed.
     """
@@ -129,5 +130,41 @@ def discovery_messages(prefix, dev_id, topics, modes, color_presets, input_sourc
         "options": list(RUN_STATES),
         "entity_category": "diagnostic",
         "icon": "mdi:state-machine",
+    })
+    # Diagnostics. The peak level doubles the sound values stored by HA, so it starts
+    # disabled: enable it in HA if you want it.
+    add("sensor", "lafmax", {
+        "name": "SmartFrame Sound Peak",
+        "state_topic": topics["lafmax"],
+        "unit_of_measurement": "dBA",
+        "device_class": "sound_pressure",
+        "state_class": "measurement",
+        "suggested_display_precision": 1,
+        "entity_category": "diagnostic",
+        "enabled_by_default": False,
+        "icon": "mdi:ear-hearing",
+    })
+    add("sensor", "cpu_temp", {
+        "name": "SmartFrame CPU Temperature",
+        "state_topic": topics["cpu_temp"],
+        "unit_of_measurement": "°C",
+        "device_class": "temperature",
+        "state_class": "measurement",
+        "suggested_display_precision": 1,
+        "entity_category": "diagnostic",
+    })
+    # Start time of the service: HA shows it as "3 hours ago" (uptime).
+    add("sensor", "started", {
+        "name": "SmartFrame Started",
+        "state_topic": topics["started"],
+        "device_class": "timestamp",
+        "entity_category": "diagnostic",
+    })
+    add("button", "restart", {
+        "name": "SmartFrame Restart",
+        "command_topic": topics["restart"],
+        "payload_press": "PRESS",
+        "device_class": "restart",
+        "entity_category": "diagnostic",
     })
     return messages
