@@ -20,7 +20,7 @@ def test_valid_config_is_unchanged():
         "default_mode": "Audio",
         "screen_size": "1280x800",
         "mqtt": {"port": 8883, "tls": True},
-        "audio": {"theme": "eink", "mic_channel": "Right", "capture_bits": 32,
+        "audio": {"theme": "eink", "font": "Barlow", "mic_channel": "Right", "capture_bits": 32,
                   "render_scale": 0.75, "noise_floor_dba": None, "device_index": 2,
                   "pixel_shift_minutes": 0},
     }

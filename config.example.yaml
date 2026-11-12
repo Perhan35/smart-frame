@@ -45,7 +45,8 @@ audio:
   calibration_slope: 1.0 # Optional 2nd calibration point (see README). 1.0 = offset only
   noise_floor_dba: null # Mic self-noise in dBA, removed from quiet readings. Set it after calibrating: scripts/measure_noise_floor.py, or ~33 (INMP441 datasheet)
   show_debug: true # CPU stats and "FAST RESPONSE | SLOPE" on the audio screen
-  theme: "neon" # "neon" (colors on black) or "eink" (ink on paper, monochrome)
+  theme: "neon" # "neon" (colors on black) or "eink" (soft grays on black, monochrome)
+  font: null # null = the theme's font (neon: pygame's bold font, eink: Barlow). Or "default" / "barlow"
   pixel_shift_minutes: 10 # Move the picture a few pixels this often, against screen burn-in. 0 = never
   preload: false # true = keep the audio mode ready in the background: faster switch to "audio", uses RAM all the time
   render_scale: 1.0 # < 1 = draw the bars smaller and let the GPU scale them up (smoothed); text stays sharp. 0.75 = good balance, 0.5 = least CPU

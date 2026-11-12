@@ -48,6 +48,7 @@ MIC_CHANNEL = 0
 SHOW_DEBUG = True  # CPU stats + "FAST RESPONSE | SLOPE" badge
 RENDER_SCALE = 1.0  # < 1: draw at a lower resolution and let SDL scale it up
 THEME_NAME = "neon"
+FONT_NAME = None  # audio.font: "default" / "barlow"; None = the theme's own font
 PIXEL_SHIFT_MINUTES = 10.0  # Move the whole picture a few pixels this often (0 = never)
 
 try:
@@ -65,6 +66,8 @@ try:
             SHOW_DEBUG = bool(audio_config.get("show_debug", True))
             RENDER_SCALE = min(1.0, max(0.25, float(audio_config.get("render_scale") or 1.0)))
             THEME_NAME = str(audio_config.get("theme") or "neon").strip().lower()
+            if audio_config.get("font"):
+                FONT_NAME = str(audio_config["font"]).strip().lower()
             shift = audio_config.get("pixel_shift_minutes")
             PIXEL_SHIFT_MINUTES = 10.0 if shift is None else float(shift)
 except Exception as e:
@@ -104,12 +107,12 @@ def send_levels(levels):
 # --- THEMES (audio.theme) ---
 # Every color of the screen. Bars are drawn opaque, already blended with the
 # background at "bar_alpha" (same look as transparency, without blending a surface).
-_INK = (34, 34, 34)
-_PAPER = (232, 229, 222)
+_GRAY = (200, 200, 195)  # "Ink" of the monochrome theme: soft warm gray
 THEMES = {
     # Neon spectrum on black (the original look)
     "neon": {
         "background": (0, 0, 0),
+        "font": "default",  # pygame's own bold font (the original look)
         "bands": None,  # None: the frequency gradient (_COLOR_WAYPOINTS below)
         "ranges": None,  # None: each range's own color (FREQ_RANGES)
         "curve": None,  # None: the bar colors
@@ -130,28 +133,30 @@ THEMES = {
         "icon": (100, 100, 100),
         "icon_slash": (255, 50, 50),
     },
-    # Ink on paper: calm and monochrome, for a matte screen that imitates e-ink
+    # Calm monochrome on black, for the e-ink look of a matte screen: soft grays only
+    # (no bright surface, nothing glows). Orange / red stay for loud levels.
     "eink": {
-        "background": _PAPER,
-        "bands": _INK,
-        "ranges": (120, 118, 112),
-        "curve": _INK,
-        "bar_alpha": 0.5,
-        "peak_bar": _INK,
-        "peak_mark": _INK,
-        "glow": (205, 202, 195),
-        "label": (110, 108, 102),
-        "tick": (160, 157, 150),
-        "text": _INK,
-        "warning": (150, 85, 10),
-        "error": (165, 35, 35),
-        "dbz": (90, 88, 84),
-        "stats": (140, 137, 130),
-        "hot": (165, 35, 35),
-        "badge": (140, 137, 130),
-        "waiting": (120, 118, 112),
-        "icon": (150, 147, 140),
-        "icon_slash": (165, 35, 35),
+        "background": (0, 0, 0),
+        "font": "barlow",
+        "bands": _GRAY,
+        "ranges": (105, 105, 100),
+        "curve": (165, 165, 160),
+        "bar_alpha": 0.55,
+        "peak_bar": (225, 225, 220),
+        "peak_mark": (185, 185, 180),
+        "glow": (32, 32, 30),
+        "label": (125, 125, 120),
+        "tick": (60, 60, 58),
+        "text": (215, 215, 210),
+        "warning": (230, 160, 60),
+        "error": (235, 85, 75),
+        "dbz": (150, 150, 145),
+        "stats": (95, 95, 92),
+        "hot": (220, 80, 80),
+        "badge": (95, 95, 92),
+        "waiting": (120, 120, 118),
+        "icon": (100, 100, 98),
+        "icon_slash": (220, 70, 60),
     },
 }
 if THEME_NAME not in THEMES:
@@ -643,8 +648,10 @@ def set_layout_shift(step):
 
 set_layout_shift(0)
 
-# Fonts shipped in assets/fonts (Barlow, SIL Open Font License): the same look on
-# every Pi. pygame's default font is the fallback if they are missing.
+# Font (audio.font, else the theme's): "default" = pygame's own bold font, "barlow" =
+# Barlow, shipped in assets/fonts (SIL Open Font License). pygame's font is also the
+# fallback if the Barlow files are missing.
+FONT_NAME = FONT_NAME or THEME["font"]
 FONT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "assets", "fonts")
 # Sizes are given in pygame default-font units (it renders at 0.6875 x the asked
 # size); FONT_SCALE gives Barlow about the same height, so the layout stays put.
@@ -652,7 +659,9 @@ FONT_SCALE = 0.6875 * 1.0
 
 
 def load_font(size, bold=False):
-    """Bundled font at a 1080p size (text pixels), or pygame's default font."""
+    """The chosen font at a 1080p size (text pixels)."""
+    if FONT_NAME != "barlow":
+        return pygame.font.Font(None, tpx(size))
     path = os.path.join(FONT_DIR, "Barlow-SemiBold.ttf" if bold else "Barlow-Regular.ttf")
     try:
         return pygame.font.Font(path, tpx(size * FONT_SCALE))

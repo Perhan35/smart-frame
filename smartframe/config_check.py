@@ -12,6 +12,7 @@ import os
 import re
 
 THEMES = ("neon", "eink")
+FONTS = ("default", "barlow")
 SECTIONS = ("mqtt", "magic_mirror", "audio")
 
 _SCREEN_SIZE = re.compile(r"^\s*\d{2,5}\s*x\s*\d{2,5}\s*$")
@@ -44,6 +45,7 @@ _CHOICES = (
     ("audio", "mic_channel", ("left", "right")),
     ("audio", "capture_bits", ("16", "32")),
     ("audio", "theme", THEMES),
+    ("audio", "font", FONTS),
 )
 
 
