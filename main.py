@@ -9,6 +9,7 @@ import paho.mqtt.client as mqtt
 import logging
 import signal
 import socket
+import struct
 import threading
 import queue
 import math
@@ -932,7 +933,49 @@ def _get_labwc_config():
             "</labwc_config>"
         )
 
+    _write_invisible_cursor_theme(os.path.join(config_dir, "icons"))
     return config_dir
+
+
+# Cursor theme with a fully transparent image, given to labwc through XCURSOR_PATH.
+# labwc draws its cursor even with no mouse plugged in (top-left of the screen at
+# startup), and it has no command to hide it from outside. Named "default": Cog asks
+# libwayland-cursor for the default theme (it ignores XCURSOR_THEME), and gets a
+# built-in arrow when XCURSOR_PATH has no theme by that name.
+INVISIBLE_CURSOR_THEME = "default"
+_CURSOR_NAMES = (
+    "default", "left_ptr", "pointer", "hand1", "hand2", "text", "xterm",
+    "wait", "watch", "progress", "crosshair", "grab", "grabbing", "move",
+)
+
+
+def _write_invisible_cursor_theme(icons_dir):
+    """Write an Xcursor theme whose cursors are a single transparent pixel."""
+    image_type, nominal_size = 0xFFFD0002, 24
+    # File header (magic, header size, version, 1 table entry) + table entry
+    # (type, size, offset of the image) + image header + one ARGB pixel (0 = transparent)
+    data = (
+        b"Xcur" + struct.pack("<III", 16, 0x10000, 1)
+        + struct.pack("<III", image_type, nominal_size, 28)
+        + struct.pack("<IIIIIIIII", 36, image_type, nominal_size, 1, 1, 1, 0, 0, 0)
+        + struct.pack("<I", 0)
+    )
+    cursors_dir = os.path.join(icons_dir, INVISIBLE_CURSOR_THEME, "cursors")
+    os.makedirs(cursors_dir, exist_ok=True)
+    for name in _CURSOR_NAMES:
+        with open(os.path.join(cursors_dir, name), "wb") as f:
+            f.write(data)
+
+
+def _invisible_cursor_env():
+    """Environment that selects the invisible cursor theme. Needed by labwc AND by its
+    clients: Cog loads its own cursor theme (libwayland-cursor) and falls back to a
+    built-in arrow when it finds none."""
+    return {
+        "XCURSOR_PATH": os.path.join(labwc_config_dir, "icons"),
+        "XCURSOR_THEME": INVISIBLE_CURSOR_THEME,
+        "XCURSOR_SIZE": "24",
+    }
 
 
 def _ensure_labwc():
@@ -960,7 +1003,7 @@ def _ensure_labwc():
 
     env = os.environ.copy()
     env["XDG_CONFIG_HOME"] = labwc_config_dir
-    env["XCURSOR_SIZE"] = "0"
+    env.update(_invisible_cursor_env())
     env["COG_PLATFORM_FDO_SHOW_CURSOR"] = "0"
 
     # Clean up stale wayland sockets so labwc can claim wayland-0 cleanly.
@@ -1011,7 +1054,6 @@ def _ensure_labwc():
                 os.environ["WAYLAND_DISPLAY"] = name
                 _display_env_detected = True
                 logging.info(f"labwc Wayland socket ready: {name} (after {(attempt+1)*0.1:.1f}s)")
-                threading.Thread(target=_labwc_hide_cursor, daemon=True).start()
                 return name
 
         if attempt % 10 == 9:
@@ -1019,17 +1061,6 @@ def _ensure_labwc():
         time.sleep(0.1)
 
     raise RuntimeError("labwc started but no Wayland socket detected within 10s")
-
-
-def _labwc_hide_cursor():
-    """Tell the persistent labwc to hide its cursor (fire-and-forget, best-effort)."""
-    try:
-        subprocess.run(
-            ["labwc-msg", "action", "HideCursor"],
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=2,
-        )
-    except Exception as e:
-        logging.debug(f"labwc-msg HideCursor failed: {e}")
 
 
 def _stop_labwc():
@@ -1266,6 +1297,8 @@ def _launch_mode(mode, previous_mode):
             )
         elif _labwc_wayland_display:
             env["WAYLAND_DISPLAY"] = _labwc_wayland_display
+            if labwc_config_dir:
+                env.update(_invisible_cursor_env())
 
     # 5. Audio with audio.preload: wake up the process that is already waiting.
     if mode == "audio":

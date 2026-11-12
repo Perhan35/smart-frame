@@ -27,10 +27,9 @@ fi
 
 echo "Connecting to MagicMirror on: $MIRROR_URL"
 
-# Suppress X11 keyboard warnings and hide cursors (X11/Wayland)
+# Suppress X11 keyboard warnings. The Wayland cursor is hidden by labwc itself
+# (invisible cursor theme set up by main.py).
 export XKB_LOG_LEVEL=0
-export XCURSOR_SIZE=0
-export XCURSOR_THEME=None
 
 # Browser selection: prefer Cog (lightweight), fall back to Chromium
 if command -v cog &> /dev/null; then
@@ -211,11 +210,6 @@ if [ -n "$WAYLAND_DISPLAY" ]; then
             done
         ) &
         DISMISS_PID=$!
-    fi
-
-    # Kiosk trigger: In Wayland, tell the compositor to hide its cursor once the browser has loaded.
-    if command -v labwc-msg &>/dev/null; then
-        (sleep 3 && labwc-msg action HideCursor) &
     fi
 elif [ -n "$DISPLAY" ]; then
     echo "Using X11 display: $DISPLAY"
