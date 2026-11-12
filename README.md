@@ -125,7 +125,11 @@ mkdir -p ~/pip_tmp
 TMPDIR=~/pip_tmp ./scripts/setup_pi.sh
 ```
 
-The setup script installs all OS-level dependencies (`portaudio`, SDL2, Chromium, etc.), creates a Python virtual environment (`.venv/`), and installs the Python packages inside it.
+The setup script installs all OS-level dependencies (`portaudio`, SDL2, Chromium, etc.), creates a Python virtual environment (`.venv/`), and installs the Python packages inside it. It then asks about a few optional system settings:
+
+- **Memory tuning** (`[Y/n]`, recommended on a Pi Zero 2): see [Performance Optimization](#performance-optimization-pi-zero-2-wh).
+- **Disable cloud-init** (`[y/N]`, only offered when cloud-init has already done its first-boot work): saves about 5 s at each boot. Settings already saved on the Pi (Wi-Fi, user, hostname) keep working, but later edits to `user-data` / `network-config` on the boot partition are no longer applied. Undo: `sudo rm /etc/cloud/cloud-init.disabled`.
+- **Persistent journal** (`[y/N]`): Raspberry Pi OS keeps the system journal in RAM only. This keeps it on the SD card (50 MB max), so the logs of a freeze can still be read after a reboot (`journalctl -b -1`). Undo: `sudo rm /etc/systemd/journald.conf.d/90-smartframe-persistent.conf`.
 
 ## Configuration
 
@@ -135,7 +139,7 @@ The setup script creates `config.yaml` from `config.example.yaml` automatically.
   - `device_id`: (Optional) name of this frame. Empty = the Pi's hostname. It replaces `{device_id}` in the topics and is part of every Home Assistant ID, so several frames can share one broker. Changing it (or the hostname) creates new entities in Home Assistant.
 - **MagicMirror**: Set the URL corresponding to your local MagicMirror instance.
 - **Screen**: `screen_size` (e.g. `"1920x1080"`) is the size the Mirror browser starts with. The audio screen uses the real screen size and scales its layout.
-- **`keep_compositor_when_off`**: `true` keeps the compositor (labwc) running in `off` mode, with the screen switched off. The next mode then starts without the 6-8 s cold start, but some RAM stays in use. Default `false`.
+- **`keep_compositor_when_off`**: `true` keeps the compositor (labwc) running in `off` mode, with the screen switched off. The next mode then starts without the 6-8 s cold start (also the first one after boot: labwc is started with the service). It keeps about 7 MB of RAM in use. Default `true`.
 - **`restore_display_settings_on_power_on`**: `true` (default) sends the saved brightness, contrast and color profile again each time the screen turns on. If your screen keeps its settings while off, `false` makes switching on faster (fewer DDC/CI commands), but changes made with the screen's own buttons are then no longer undone.
 - Invalid values in `config.yaml` (a word instead of a number, an unknown mode...) never stop the frame: they are replaced by their default, with a warning in the log (`journalctl -u smartframe`).
 - **Audio Mode**:

@@ -29,7 +29,7 @@ mqtt:
 debug: false # Set to true to see all browser and subprocess output in the terminal
 default_mode: "off" # Possible values: "audio", "mirror", or "off"
 screen_size: "1920x1080" # Screen resolution, used by the Mirror browser for its first frame
-keep_compositor_when_off: false # true = faster switch from "off" (no 6-8 s cold start), uses some RAM all the time
+keep_compositor_when_off: true # true = faster switch from "off" (no 6-8 s cold start); labwc stays running (~7 MB of RAM)
 restore_display_settings_on_power_on: true # Send brightness/contrast/color again when the screen turns on. false = faster, if your screen keeps them
 
 magic_mirror:

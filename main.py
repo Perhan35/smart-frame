@@ -167,7 +167,7 @@ _run_state = RUN_OFF
 
 # Keep labwc running in "off" (screen still switched off): the next mode starts
 # without the 6-8 s cold start, at the cost of some RAM. Off by default.
-KEEP_COMPOSITOR_WHEN_OFF = bool(config.get("keep_compositor_when_off", False))
+KEEP_COMPOSITOR_WHEN_OFF = bool(config.get("keep_compositor_when_off", True))
 # Send the saved brightness, contrast and color profile again each time the screen
 # turns on. Turn it off if your screen keeps its settings while off: switching on is
 # then faster, but changes made with the screen's own buttons are no longer undone.

@@ -70,6 +70,44 @@ else
     "$DIR/setup_memory.sh"
 fi
 
+# Optional: skip cloud-init at boot. On recent Raspberry Pi OS images it applies the
+# Raspberry Pi Imager settings (user, Wi-Fi, hostname) at the first boot, then has
+# nothing left to do but still runs at every boot.
+if [ -d /etc/cloud ] && [ ! -f /etc/cloud/cloud-init.disabled ] \
+        && cloud-init status 2>/dev/null | grep -q "status: done"; then
+    echo ""
+    echo "== cloud-init (optional) =="
+    echo "cloud-init has already applied your Raspberry Pi Imager settings. Disabling it saves"
+    echo "about 5 s at each boot. The Wi-Fi and settings already saved on the Pi keep working,"
+    echo "but later edits to user-data / network-config on the boot partition are no longer applied."
+    read -rp "Disable cloud-init? [y/N] " cloud_answer
+    if [[ "$cloud_answer" =~ ^[Yy]$ ]]; then
+        sudo touch /etc/cloud/cloud-init.disabled
+        echo "cloud-init disabled (undo: sudo rm /etc/cloud/cloud-init.disabled)."
+    fi
+fi
+
+# Optional: keep the system journal across reboots. Raspberry Pi OS keeps it in RAM
+# only, so the logs of a freeze or crash are gone once the Pi is restarted.
+JOURNAL_CONF=/etc/systemd/journald.conf.d/90-smartframe-persistent.conf
+if [ ! -f "$JOURNAL_CONF" ]; then
+    echo ""
+    echo "== Persistent journal (optional) =="
+    echo "Keeps the logs on the SD card (50 MB max), so that after a freeze and a reboot you can"
+    echo "still read what happened (journalctl -b -1). Costs a few more writes to the SD card."
+    read -rp "Keep the journal across reboots? [y/N] " journal_answer
+    if [[ "$journal_answer" =~ ^[Yy]$ ]]; then
+        sudo mkdir -p /etc/systemd/journald.conf.d
+        printf '%s\n' \
+            "# SmartFrame (scripts/setup_pi.sh): keep the journal across reboots" \
+            "# (overrides Raspberry Pi OS's volatile, RAM-only journal)" \
+            "[Journal]" "Storage=persistent" "SystemMaxUse=50M" "SyncIntervalSec=15s" \
+            | sudo tee "$JOURNAL_CONF" >/dev/null
+        sudo systemctl restart systemd-journald
+        echo "Persistent journal enabled (undo: sudo rm $JOURNAL_CONF)."
+    fi
+fi
+
 echo ""
 echo "== Audio Input Configuration =="
 echo "SmartFrame can automatically discover your I2S microphone during its first run."
