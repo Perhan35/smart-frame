@@ -43,6 +43,7 @@ audio:
   threshold_db_error: 85 # Volume in dB to trigger red text color
   calibration_offset_db: 33 # Theoretical INMP441 value. Fine-tune it with a sound level meter or a phone app (see README)
   calibration_slope: 1.0 # Optional 2nd calibration point (see README). 1.0 = offset only
+  mic_compensation: false # true = undo the INMP441's typical frequency response (datasheet curve); calibrate again after changing it
   noise_floor_dba: null # Mic self-noise in dBA, removed from quiet readings. Set it after calibrating: scripts/measure_noise_floor.py, or ~33 (INMP441 datasheet)
   show_debug: true # CPU stats and "FAST RESPONSE | SLOPE" on the audio screen
   theme: "neon" # "neon" (colors on black) or "eink" (soft grays on black, monochrome)

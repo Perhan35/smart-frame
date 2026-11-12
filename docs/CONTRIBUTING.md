@@ -1,3 +1,7 @@
+## This repository is public
+
+Everything committed here (code, comments, docs, config examples, screenshots, commit messages) is visible to anyone. Keep it generic: no personal setup details such as IP addresses, hostnames, usernames or passwords, network layout, or screenshots showing real calendars, places or names. Use placeholders (`[MQTT_SERVER_IP_ADDRESS]`) and made-up data instead. Your own values belong in `config.yaml`, which is not committed.
+
 ## Local Development (macOS)
 
 To run the audio mode locally on macOS for testing (mirror mode requires Chromium kiosk and is Pi-only):

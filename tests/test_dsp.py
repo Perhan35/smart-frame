@@ -102,3 +102,36 @@ def test_capture_bits():
     assert dsp.capture_bits({}) == 16
     assert dsp.capture_bits({"capture_bits": 32}) == 32
     assert dsp.capture_bits({"capture_bits": 24}) == 16
+
+
+def test_mic_compensation_is_0_db_at_1khz_and_undoes_the_roll_offs():
+    gains_db = 20 * np.log10(dsp.mic_compensation_gains(RATE, 48000))  # 1 Hz bins
+    assert gains_db[1000] == pytest.approx(0.0, abs=0.01)
+    assert gains_db[50] == pytest.approx(3.5, abs=0.1)  # Datasheet: -3.6 dB at 50 Hz
+    assert gains_db[17700] == pytest.approx(3.55, abs=0.1)
+    assert gains_db[5] <= dsp.MAX_MIC_BOOST_DB  # Held flat and capped below 20 Hz
+
+
+def test_mic_compensation_off_or_flat_changes_nothing(monkeypatch):
+    s = sine(1000, 1000)
+    plain = laeq(s, calibration_offset_db=0)
+    assert laeq(s, calibration_offset_db=0, mic_compensation=False) == plain
+    assert laeq(s, calibration_offset_db=0, mic_compensation=True) == pytest.approx(plain, abs=0.05)
+    monkeypatch.setattr(dsp, "INMP441_RESPONSE", ((20, 0.0), (20000, 0.0)))
+    monkeypatch.setattr(dsp.mic_compensation_gains, "__defaults__", (dsp.INMP441_RESPONSE,))
+    low = sine(50, 1000)
+    assert laeq(low, calibration_offset_db=0, mic_compensation=True) == pytest.approx(
+        laeq(low, calibration_offset_db=0), abs=0.01)
+
+
+def test_mic_compensation_raises_the_rolled_off_highs():
+    # 15.6 kHz: the datasheet curve is -2.9 dB there (-2.8 dB once 1 kHz is set to 0).
+    # Bins are 23 Hz wide, so a low tone would spread over bins with different gains.
+    high = sine(15600, 1000)
+    gain = laeq(high, calibration_offset_db=0, mic_compensation=True) - laeq(high, calibration_offset_db=0)
+    assert gain == pytest.approx(2.8, abs=0.15)
+
+
+def test_meter_settings_reads_mic_compensation():
+    assert dsp.meter_settings({})["mic_compensation"] is False
+    assert dsp.meter_settings({"mic_compensation": True})["mic_compensation"] is True

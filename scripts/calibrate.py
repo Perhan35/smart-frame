@@ -112,6 +112,7 @@ class Mic:
         if info is None:
             self.p.terminate()
             raise RuntimeError("No microphone found.")
+        self.mic_compensation = dsp.meter_settings(audio)["mic_compensation"]
         self.bits = dsp.capture_bits(audio)
         self.channel = dsp.channel_index(audio.get("mic_channel", "left"))
         self.channels, self.rate = dsp.input_format(info)
@@ -128,7 +129,8 @@ class Mic:
     def measure(self, seconds, offset):
         """LAeq over `seconds` (offset applied, slope 1.0, no noise floor) and the spread."""
         meter = dsp.LevelMeter(self.rate, calibration_offset_db=offset,
-                               noise_floor_dba=None, calibration_slope=1.0)
+                               noise_floor_dba=None, calibration_slope=1.0,
+                               mic_compensation=self.mic_compensation)
         self.read()  # Drop what was buffered while waiting for the user
         per_second, energy = [], 0.0
         print("  GO: reset the app's average now.")

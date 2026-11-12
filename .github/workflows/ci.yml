@@ -25,13 +25,14 @@ jobs:
       - uses: actions/checkout@v4
       - name: Install tools  # shellcheck is preinstalled on ubuntu runners
         # Only what the tests need: pygame/pyaudio (PortAudio, SDL) are not installed,
-        # the tests never import them.
+        # the tests never import them (tests/conftest.py stubs pyaudio).
         run: |
           pip install --quiet \
             "$(grep '^ruff==' requirements-dev.txt)" \
             "$(grep '^pytest==' requirements-dev.txt)" \
             "$(grep '^pip-audit==' requirements-dev.txt)" \
             "$(grep '^numpy==' requirements.txt)" \
+            "$(grep '^paho-mqtt==' requirements.txt)" \
             "$(grep '^PyYAML==' requirements.txt)"
       - name: Lint
         run: scripts/lint.sh

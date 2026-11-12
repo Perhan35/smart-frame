@@ -25,6 +25,7 @@ _BOOLEANS = (
     ("mqtt", "tls"),
     ("audio", "show_debug"),
     ("audio", "preload"),
+    ("audio", "mic_compensation"),
 )
 
 # (section, key, minimum, maximum, null allowed). A number written as text ("37")

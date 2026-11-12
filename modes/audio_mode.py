@@ -199,7 +199,10 @@ print("Initializing Audio Mode...")
 
 # SDL reads these when the display is initialised, so they are set first.
 if not os.environ.get("DISPLAY") and not os.environ.get("WAYLAND_DISPLAY"):
-    # Headless/Console mode detected, force KMSDRM
+    # No compositor (labwc failed to start): try KMSDRM. The SDL bundled with pip's
+    # pygame is built without kmsdrm, so this usually ends on the dummy driver below
+    # (no picture, but the dBA still reaches Home Assistant). A pygame built against
+    # the system SDL2 (with kmsdrm) would draw straight to the screen.
     os.environ["SDL_VIDEODRIVER"] = "kmsdrm"
     # Ensure it uses the primary DRM device
     if not os.environ.get("SDL_DRM_DEVICE"):
@@ -220,8 +223,10 @@ os.environ.setdefault("SDL_RENDER_SCALE_QUALITY", "linear")
 HAS_GPU = os.path.exists("/dev/dri/card0") or os.path.exists("/dev/dri/renderD128")
 
 if HAS_GPU:
-    # Ask SDL2 for its GLES2 renderer (used for the window surface on Wayland, and
-    # for the scaling of render_scale). Its real effect is still to be checked on the Pi.
+    # Ask SDL2 for its GLES2 renderer (used by the GPU layers, the window surface on
+    # Wayland and the scaling of render_scale). Checked on a Pi Zero 2 under labwc:
+    # without it SDL picks desktop OpenGL; both are accelerated, GLES2 is the GPU's
+    # native API.
     os.environ["SDL_RENDER_DRIVER"] = "opengles2"
     print("GPU detected: asking SDL2 for the GLES2 renderer.")
 else:

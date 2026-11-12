@@ -33,6 +33,19 @@ DEFAULT_CALIBRATION_OFFSET_DB = 33.0
 # The 2-point slope turns the scale around this level: calibrate the offset near it.
 CALIBRATION_REF_DBA = 65.0
 
+# INMP441 typical frequency response (datasheet DS-INMP441-00 rev 1.1, Figure 5
+# "Typical Frequency Response (Measured)"), as (Hz, dB). Read from the figure's vector
+# data. It is a typical unit, not this one: individual mics differ by a dB or two.
+INMP441_RESPONSE = (
+    (20, -11.0), (25, -8.7), (31.5, -6.6), (40, -4.9), (50, -3.6), (63, -2.5),
+    (80, -1.7), (100, -1.15), (125, -0.7), (160, -0.4), (200, -0.25), (250, -0.15),
+    (315, -0.05), (500, 0.0), (1000, -0.1), (2700, 0.05), (6000, -0.2), (7700, -0.65),
+    (9700, -1.15), (13600, -2.45), (15600, -2.9), (17700, -3.65),
+)
+# The compensation never boosts more than this (the 20 Hz end needs +11 dB, where
+# the A-weighting already removes 50 dB, so the cap only matters for dBZ).
+MAX_MIC_BOOST_DB = 12.0
+
 
 def meter_settings(audio_config):
     """LevelMeter keyword arguments from the `audio:` section of config.yaml."""
@@ -43,7 +56,24 @@ def meter_settings(audio_config):
         "calibration_offset_db": DEFAULT_CALIBRATION_OFFSET_DB if offset is None else float(offset),
         "noise_floor_dba": audio_config.get("noise_floor_dba"),
         "calibration_slope": 1.0 if slope is None else float(slope),
+        "mic_compensation": audio_config.get("mic_compensation") is True,
     }
+
+
+def mic_compensation_gains(rate, n, response=INMP441_RESPONSE):
+    """Linear gain for each rfft bin of an n-point frame that undoes the mic's
+    frequency response (0 dB at 1 kHz, so the calibration offset stays valid).
+
+    The response is interpolated in log frequency and held flat beyond its first
+    and last points (no extrapolation of the roll-offs).
+    """
+    f = np.fft.rfftfreq(n, 1.0 / rate)
+    log_hz = np.log10([p[0] for p in response])
+    resp_db = np.array([p[1] for p in response], dtype=np.float64)
+    resp_db -= np.interp(3.0, log_hz, resp_db)  # 1 kHz -> 0 dB
+    at_bins = np.interp(np.log10(np.maximum(f, 1e-10)), log_hz, resp_db)
+    boost_db = np.minimum(-at_bins, MAX_MIC_BOOST_DB)
+    return 10 ** (boost_db / 20.0)
 
 
 def capture_bits(audio_config):
@@ -120,7 +150,7 @@ class LevelMeter:
     """
 
     def __init__(self, rate, calibration_offset_db=0.0, noise_floor_dba=None,
-                 frame_size=FRAME_SIZE, calibration_slope=1.0):
+                 frame_size=FRAME_SIZE, calibration_slope=1.0, mic_compensation=False):
         self.rate = int(rate)
         self.n = int(frame_size)
         self.hop = self.n // 2
@@ -135,6 +165,8 @@ class LevelMeter:
         bin_weights[0] = 1.0
         bin_weights[-1] = 1.0
         norm = 1.0 / (self.n * self.hop)
+        if mic_compensation:  # audio.mic_compensation: undo the mic's own response
+            bin_weights = bin_weights * mic_compensation_gains(self.rate, self.n) ** 2
         self._w_a = bin_weights * a_weighting_gains(self.rate, self.n) ** 2 * norm
         z = bin_weights.copy()
         freqs = np.fft.rfftfreq(self.n, 1.0 / self.rate)

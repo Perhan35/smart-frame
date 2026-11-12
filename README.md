@@ -32,6 +32,8 @@ To connect the INMP441 I2S microphone to your Raspberry Pi, follow the wiring ta
 
 ![SmartFrame Mirror Mode](images/smartframe_mirror_mode.png)
 
+*Mirror mode, shown with made-up data (your MagicMirror shows your own modules).*
+
 ## Linux Prerequisites (Raspberry Pi OS)
 
 1. **Enable I2S Microphone**: Update `/boot/firmware/config.txt`:
@@ -150,6 +152,7 @@ The setup script creates `config.yaml` from `config.example.yaml` automatically.
   - `capture_bits`: `16` (default) or `32`. 32 keeps the full 24-bit resolution of the INMP441 (better in very quiet rooms). The calibration stays the same. Go back to 16 if the microphone does not open.
   - `calibration_offset_db`: added to every reading. The default, `33`, is the theoretical value for the INMP441 (datasheet). Fine-tune it as described in [Calibrating the sound level](#calibrating-the-sound-level).
   - `calibration_slope`: (Optional) second calibration point. `1.0` = offset only.
+  - `mic_compensation`: `true` undoes the INMP441's typical frequency response (the measured curve of its datasheet: about −11 dB at 20 Hz, −3.6 dB at 50 Hz, flat from 300 Hz to 5 kHz, −3.7 dB at 17.7 kHz). It changes the dBA and dBZ numbers, not the spectrum bars. It is a typical curve, so your own mic can still differ by a dB or two. Default `false`. Calibrate again after changing it.
   - `noise_floor_dba`: (Optional) the mic's own noise in dBA, removed from every reading in energy. Set it **after** calibrating, either with `scripts/measure_noise_floor.py` (stop the service first, measure in a very quiet room) or with the INMP441 datasheet value (about 33). Leave it empty for no correction.
   - `show_debug`: `true` (default) shows the CPU stats and the "FAST RESPONSE | SLOPE" line on the audio screen. `false` hides them.
   - `theme`: `"neon"` (default, colors on black) or `"eink"` (soft grays on black, monochrome and calm, for the e-ink look; orange and red stay for loud levels).
