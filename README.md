@@ -45,8 +45,10 @@ To connect the INMP441 I2S microphone to your Raspberry Pi, follow the wiring ta
 
    ```ini
    dtoverlay=vc4-kms-v3d
-   gpu_mem=128
+   gpu_mem=32
    ```
+
+   With `vc4-kms-v3d`, the screen, the audio mode and the browser draw with memory that Linux manages (CMA). `gpu_mem` only reserves memory for the firmware's video decoder and camera, which SmartFrame does not use, so a low value leaves more RAM for Linux. `scripts/setup_memory.sh` sets it for you (see [Performance Optimization](#performance-optimization-pi-zero-2-wh)). Raise it again (e.g. `gpu_mem=64`) only if you add hardware video decoding, such as a MagicMirror module that plays videos.
 
 3. **Configure Screen**: Adapt to your needs:
 
@@ -74,7 +76,15 @@ or force the kernel by adding into `/boot/firmware/cmdline.txt`:
 
 ## Performance Optimization (Pi Zero 2 WH)
 
-The Pi Zero 2 WH has limited RAM (512MB). Use **zram** (compressed swap in RAM) as the main swap: it is fast and does not wear out the SD card. A small swap file on the SD card is only a safety net for rare peaks.
+The Pi Zero 2 WH has limited RAM (512MB). When it runs out, the Pi swaps to the SD card, which is very slow: the Mirror mode can then take minutes to show its modules. Use **zram** (compressed swap in RAM) as the main swap: it is fast and does not wear out the SD card. A small swap file on the SD card is only a safety net for rare peaks.
+
+`./scripts/setup_memory.sh` (offered by `setup_pi.sh`) does all of this, and is safe to run again:
+
+- sets `gpu_mem=32` (see [Raspberry Pi configuration](#linux-prerequisites-raspberry-pi-os)), backing up `config.txt` first;
+- starts a zram swap (half of the RAM, zstd) unless one is already active;
+- sets `vm.swappiness=100` (in `/etc/sysctl.d/99-smartframe-zram.conf`), so the Pi uses zram early instead of waiting until RAM is full.
+
+Reboot afterwards for `gpu_mem` to apply. To do it by hand instead:
 
 ```bash
 # 1. Check what you have. Recent Raspberry Pi OS versions already set up zram
@@ -86,6 +96,8 @@ sudo apt install -y systemd-zram-generator
 printf '[zram0]\nzram-size = ram / 2\ncompression-algorithm = zstd\nswap-priority = 100\n' \
   | sudo tee /etc/systemd/zram-generator.conf
 sudo systemctl daemon-reload && sudo systemctl start systemd-zram-setup@zram0
+echo 'vm.swappiness=100' | sudo tee /etc/sysctl.d/99-smartframe-zram.conf
+sudo sysctl -p /etc/sysctl.d/99-smartframe-zram.conf
 
 # 3. Optional safety net: a small 512 MB swap file, used only when zram is full
 #    (lower priority). Skip it if your OS already has a swap file.

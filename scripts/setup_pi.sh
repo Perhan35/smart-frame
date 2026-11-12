@@ -58,6 +58,18 @@ fi
 # Hardware access without sudo at runtime (i2c-dev, framebuffer) + config.yaml permissions
 "$DIR/setup_hardware_access.sh"
 
+# Memory tuning for the Pi Zero 2 (gpu_mem, zram, swappiness): see scripts/setup_memory.sh
+echo ""
+echo "== Memory tuning (recommended on a Pi Zero 2) =="
+echo "Gives the GPU memory that SmartFrame does not use back to Linux (gpu_mem=32),"
+echo "and adds zram, a fast compressed swap in RAM, used before the swap on the SD card."
+read -rp "Apply the memory tuning? [Y/n] " mem_answer
+if [[ "$mem_answer" =~ ^[Nn]$ ]]; then
+    echo "Skipped. You can run it later with: ./scripts/setup_memory.sh"
+else
+    "$DIR/setup_memory.sh"
+fi
+
 echo ""
 echo "== Audio Input Configuration =="
 echo "SmartFrame can automatically discover your I2S microphone during its first run."
