@@ -1644,7 +1644,12 @@ def _handle_message(msg):
         # "offline" while we run: the last will of a connection the broker only now
         # found dead (power cut, Wi-Fi drop). HA would show every entity unavailable.
         if ha.should_reassert_online(msg.payload, _going_offline):
-            logging.warning("Stale 'offline' status found on the broker: sending 'online' again.")
+            if msg.retain:
+                # Delivered on (re)subscribe: the last will of the previous run (a normal
+                # service restart). Expected; on_connect has already sent "online" too.
+                logging.info("Previous run left 'offline' on the broker: sending 'online' again.")
+            else:
+                logging.warning("Stale 'offline' status found on the broker: sending 'online' again.")
             mqtt_client.publish(MQTT_STATUS_TOPIC, "online", retain=True)
         return
     cmd = _command_routes().get(msg.topic)
