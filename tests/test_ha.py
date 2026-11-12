@@ -59,3 +59,23 @@ def test_diagnostic_entities():
     assert by_obj["started"][1]["device_class"] == "timestamp"
     assert by_obj["restart"][0] == "homeassistant/button/smartframe_living/restart/config"
     assert by_obj["restart"][1]["command_topic"] == TOPICS["restart"]
+
+
+def test_mqtt_client_id_is_fixed_per_device():
+    assert ha.mqtt_client_id("salon") == "smartframe-salon"
+    assert ha.mqtt_client_id("salon") == ha.mqtt_client_id("salon")
+    assert ha.mqtt_client_id("salon") != ha.mqtt_client_id("bureau")
+
+
+def test_stale_offline_is_corrected_while_running():
+    assert ha.should_reassert_online(b"offline", going_offline=False)
+    assert ha.should_reassert_online(b"offline\n", going_offline=False)
+
+
+def test_offline_is_kept_while_stopping():
+    assert not ha.should_reassert_online(b"offline", going_offline=True)
+
+
+def test_online_needs_no_correction():
+    assert not ha.should_reassert_online(b"online", going_offline=False)
+    assert not ha.should_reassert_online(b"", going_offline=False)

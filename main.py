@@ -1470,6 +1470,8 @@ def on_connect(client, userdata, _connect_flags, reason_code, _properties):
         for topic in _command_routes():
             client.subscribe(topic)
         client.subscribe(MQTT_HA_STATUS_TOPIC)
+        # Our own status: a stale "offline" last will is caught and corrected
+        client.subscribe(MQTT_STATUS_TOPIC)
         logging.info(f"Subscribed to the command topics (device '{DEVICE_ID}').")
 
         client.publish(MQTT_STATUS_TOPIC, "online", retain=True)
@@ -1488,6 +1490,7 @@ def on_connect(client, userdata, _connect_flags, reason_code, _properties):
                                  "mqtt.password in config.yaml (and the broker's users).")
 
 
+_going_offline = False  # Set while the service stops: "offline" is then expected
 _last_conn_fail_log = 0.0
 _refused_logged_at = 0.0
 _refused_logged = set()
@@ -1593,6 +1596,8 @@ def restart_service():
         stop_current_mode()
         _stop_audio_preload()
         _stop_labwc()
+    global _going_offline
+    _going_offline = True  # Our own "offline" below must not be corrected
     client = mqtt_client
     if client and client.is_connected():
         try:
@@ -1634,6 +1639,13 @@ def _handle_message(msg):
         if msg.payload.strip() == b"online" and not msg.retain:
             logging.info("Home Assistant is back online: sending discovery again.")
             _announce_later(mqtt_client)
+        return
+    if msg.topic == MQTT_STATUS_TOPIC:
+        # "offline" while we run: the last will of a connection the broker only now
+        # found dead (power cut, Wi-Fi drop). HA would show every entity unavailable.
+        if ha.should_reassert_online(msg.payload, _going_offline):
+            logging.warning("Stale 'offline' status found on the broker: sending 'online' again.")
+            mqtt_client.publish(MQTT_STATUS_TOPIC, "online", retain=True)
         return
     cmd = _command_routes().get(msg.topic)
     if cmd is None:
@@ -1703,7 +1715,8 @@ def publish_cpu_temp():
 
 def signal_handler(sig, frame):
     logging.info(f"Signal {sig} received. Shutting down orchestrator...")
-    global audio_monitor_thread
+    global audio_monitor_thread, _going_offline
+    _going_offline = True
     if audio_monitor_thread:
         audio_monitor_thread.running = False
     stop_current_mode()
@@ -1730,7 +1743,7 @@ if __name__ == "__main__":
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
 
-    mqtt_client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
+    mqtt_client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id=ha.mqtt_client_id(DEVICE_ID))
     # Never let an exception in a callback kill paho's network thread. paho then only
     # reports callback errors through its logger, so attach one.
     mqtt_client.suppress_exceptions = True

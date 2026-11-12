@@ -43,6 +43,20 @@ def node_id(dev_id):
     return f"smartframe_{dev_id}"
 
 
+def mqtt_client_id(dev_id):
+    """Fixed MQTT client ID. After a power cut, the broker still holds the dead
+    connection. With the same ID, it closes that connection as soon as the new
+    one arrives, so the old "offline" last will cannot land after our "online"
+    (with a random ID it lands up to 1.5 x keepalive later and hides the frame)."""
+    return f"smartframe-{dev_id}"
+
+
+def should_reassert_online(payload, going_offline):
+    """True when "offline" reached our own status topic while we are still running:
+    a stale last will from a previous connection. Send "online" again."""
+    return not going_offline and bytes(payload).strip() == b"offline"
+
+
 def legacy_discovery_topics(prefix):
     return [f"{prefix}/{component}/smartframe/{obj}/config" for component, obj in _LEGACY_ENTITIES]
 
