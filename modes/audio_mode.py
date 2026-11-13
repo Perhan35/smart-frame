@@ -15,6 +15,7 @@ from contextlib import contextmanager
 # Shared DSP (smartframe/ package at the repo root): same level math as the orchestrator.
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 from smartframe import dsp  # noqa: E402
+from smartframe import spectrum  # noqa: E402
 from smartframe import perf  # noqa: E402  # PERF
 from smartframe.audio_input import open_input, resolve_device  # noqa: E402
 from smartframe import config_check  # noqa: E402
@@ -167,8 +168,7 @@ BACKGROUND = THEME["background"]
 
 # Audio Configuration (Ideal Balancing for Zero 2 WH)
 CHUNK_READ = 1536  # Optimized speed (~31Hz updates)
-FFT_SIZE = 8192  # High-fidelity 8k FFT for maximum visual resolution
-FFT_EVERY = 2  # Big FFT on 1 frame out of 2 (~15 Hz): the bars smooth in between
+FFT_EVERY = 2  # Long FFT (bass, mids) on 1 frame out of 2 (~15 Hz); treble on every frame
 OPEN_RETRY_S = 3.0  # Retry opening the mic this often (it may still be held)
 # Format of the open stream: set from the device by open_stream()
 stream_channels = 1
@@ -442,35 +442,10 @@ def select_input_device(log):
 
 
 # --- SPECTRUM ANALYZER CONFIGURATION ---
-NUM_BANDS = 120  # high density (Mastering Grade)
-MIN_FREQ = 25
-MAX_FREQ = 22500  # Capped at 22.5kHz to eliminate Nyquist noise artifacts
-
-# Bar scale (auto gain). The top follows the loudest band, so the bars show the shape
-# of the sound at any volume. A bar starts at its band's noise gate (the mic's own
-# noise + a margin), so silence draws nothing, even when the top is low.
-DISPLAY_RANGE_DB = 45.0  # dB from the top of the scale to its bottom
-TOP_HEADROOM_DB = 3.0  # The loudest band stays just under the top
-TOP_ATTACK = 0.3  # Share of a louder peak the top takes at each FFT (~0.2 s)
-TOP_RELEASE_DB_PER_S = 3.0  # How fast the top comes down after a loud part
-MIN_SPAN_DB = 20.0  # A bar needs at least this many dB above its gate to fill up
-
-# Background noise of an INMP441 on a Raspberry Pi in a quiet room, as (Hz, dB):
-# mean band level in the bars' units (8192-point Blackman FFT at 48 kHz, int16 LSB
-# scale, before the visual tilt). Measured from a 10 s silent capture. The bump near
-# 50 Hz is mains hum. Bars below this (+ a margin) are only mic noise.
-NOISE_FLOOR = (
-    (25, 74.9), (31.5, 73.6), (40, 71.7), (50, 72.6), (63, 68.4), (80, 66.5),
-    (100, 64.9), (125, 63.3), (160, 62.3), (200, 57.6), (250, 56.9), (315, 55.1),
-    (400, 53.3), (500, 52.2), (630, 50.1), (800, 48.9), (1000, 47.0), (1250, 46.3),
-    (1600, 44.9), (2000, 43.5), (2500, 42.4), (3150, 41.4), (4000, 40.3), (5000, 40.2),
-    (6300, 38.8), (8000, 38.2), (10000, 37.9), (12500, 37.7), (16000, 37.7),
-    (20000, 40.0), (22500, 40.0),
-)
-# Gate margin above the noise floor: 9 dB for a 1-bin band, less for wide bands
-# (their mean over many bins moves less). Silence then crosses a gate ~0.5 % of the time.
-GATE_MARGIN_DB = 9.0
-GATE_MARGIN_EXPONENT = 0.33
+# Band math, display balance and auto gain: smartframe/spectrum.py
+NUM_BANDS = spectrum.NUM_BANDS
+MIN_FREQ = spectrum.MIN_FREQ
+MAX_FREQ = spectrum.MAX_FREQ
 MIN_BAR = 0.03  # Smaller bars are not drawn (gate flicker)
 
 # Smoothing adjusted for optimized (~31Hz) updates
@@ -480,15 +455,11 @@ CURVE_SMOOTHING = 0.75  # Responsive curve with smooth 'Liquid' feel
 PEAK_GRAVITY = 0.008  # Gravity adjusted for ~31Hz
 PEAK_MAX_SPEED = 0.08  # Max speed adjusted for ~31Hz
 
-# Professional Slope Setting: Increased to 4.0dB for better visual high-end energy
-SLOPE_DB_PER_OCTAVE = 4.0
-HIGH_FREQ_BOOST = 4.5  # Reduced slightly to 4.5dB for ultra-high frequencies (>10kHz)
-
 # Frequency Range Definitions (Synchronized with Legend Color Boundaries)
 FREQ_RANGES = [
     {"name": "BASS", "min": 20, "max": 225, "level": 1, "color": (100, 150, 255)},
     {"name": "MIDS", "min": 225, "max": 2500, "level": 1, "color": (150, 255, 150)},
-    {"name": "TREBLE", "min": 2500, "max": 22500, "level": 1, "color": (255, 150, 100)},
+    {"name": "TREBLE", "min": 2500, "max": 20000, "level": 1, "color": (255, 150, 100)},
     {"name": "Sub", "min": 20, "max": 60, "level": 0, "color": (80, 120, 220)},
     {"name": "Low", "min": 60, "max": 250, "level": 0, "color": (100, 140, 240)},
     {"name": "Low-Mid", "min": 250, "max": 500, "level": 0, "color": (120, 220, 120)},
@@ -504,68 +475,20 @@ FREQ_RANGES = [
     {
         "name": "Brilliance",
         "min": 10000,
-        "max": 22500,
+        "max": 20000,
         "level": 0,
         "color": (240, 150, 80),
     },
 ]
 
-# Log-spaced band edges (independent of the sample rate)
-band_edges = np.logspace(np.log10(max(1.0, MIN_FREQ)), np.log10(MAX_FREQ), NUM_BANDS + 1)
-band_centers = np.sqrt(band_edges[:-1] * band_edges[1:])
-# Each band is a run of FFT bins [start, stop). Bins are rate/FFT_SIZE (~5.9 Hz) apart:
-# below ~100 Hz several narrow bands fall back to the same single bin, hence the
-# "staircase" in the bass. That is the FFT resolution, not a bug.
-band_starts = band_stops = band_counts = None  # Filled by build_rate_tables()
-band_db_adjust = band_gate_db = None
-_vlf_mask = _nyquist_mask = None
-
-# Calculate professional visual tilt based on the requested slope
-# We use 1kHz as the zero-crossing reference point
-octaves_from_reference = np.log2(np.array(band_centers) / 1000.0)
-visual_tilt = octaves_from_reference * SLOPE_DB_PER_OCTAVE
-# Tilt + the HF boost for air frequencies (>10kHz), per band
-band_db_shaping = visual_tilt + np.where(band_centers > 10000, HIGH_FREQ_BOOST, 0.0)
-
-
-def build_rate_tables(sample_rate):
-    """FFT bin tables that depend on the sample rate (rebuilt when the mic opens)."""
-    global band_starts, band_stops, band_counts, band_db_adjust, band_gate_db
-    global _vlf_mask, _nyquist_mask
-    freqs = np.fft.rfftfreq(FFT_SIZE, 1.0 / sample_rate)
-    starts = np.searchsorted(freqs, band_edges[:-1], side="left")
-    stops = np.searchsorted(freqs, band_edges[1:], side="left")
-    for i in np.where(stops <= starts)[0]:
-        # Range too narrow for this FFT resolution: take the nearest bin
-        k = int(np.argmin(np.abs(freqs - band_centers[i])))
-        starts[i], stops[i] = k, k + 1
-    band_starts, band_stops = starts, stops
-    band_counts = (stops - starts).astype(np.float64)
-    # A band's level is the RMS of its bins (power mean). For noise that reads about
-    # 1.05 dB above the old amplitude mean when a band has many bins (0 dB for one
-    # bin): remove that (NOISE_FLOOR below was measured with this adjustment).
-    band_db_adjust = 10 * np.log10(np.pi / 4) * (1.0 - 1.0 / band_counts)
-    # Noise gate of each band, in the same units as the bars (tilt included). The
-    # noise power in one bin grows with the bin width (rate / FFT_SIZE).
-    floor = np.interp(np.log10(band_centers), np.log10([p[0] for p in NOISE_FLOOR]),
-                      [p[1] for p in NOISE_FLOOR])
-    band_gate_db = (floor + 10 * np.log10(sample_rate / 48000.0) + band_db_shaping
-                    + GATE_MARGIN_DB * band_counts ** -GATE_MARGIN_EXPONENT)
-    _vlf_mask = freqs < 1  # DC/VLF removal mask
-    _nyquist_mask = freqs > 22500  # Nyquist cleanup mask
-
-
-build_rate_tables(stream_rate)
+analyzer = spectrum.Spectrum(stream_rate)  # Rebuilt when the mic opens (sample rate)
+band_centers = analyzer.centers
 
 bar_heights = np.zeros(NUM_BANDS)
 peak_heights = np.zeros(NUM_BANDS)
 current_bar_targets = np.zeros(NUM_BANDS)
-audio_buffer = np.zeros(FFT_SIZE, dtype=np.float64)
-scale_top_db = float(band_gate_db.max())  # Top of the auto-gain scale
+audio_buffer = np.zeros(spectrum.LONG_FFT, dtype=np.float64)
 last_fft_time = None
-
-# Blackman-Harris window for ultra-low spectral leakage (Mastering grade)
-fft_window = np.blackman(FFT_SIZE)
 
 # Store last peak positions and velocities for gravity effect
 peak_pos = np.zeros(NUM_BANDS)
@@ -583,7 +506,7 @@ _COLOR_WAYPOINTS = [
     (2000, 160, 255, 160),  # Hi-Mid
     (5000, 240, 200, 120),  # Highs
     (10000, 240, 150, 80),  # Brilliance
-    (22500, 220, 100, 60),  # Extended Brilliance
+    (20000, 220, 100, 60),  # Extended Brilliance
 ]
 band_colors = []
 for _fc in band_centers:
@@ -605,24 +528,6 @@ if THEME["bands"] is not None:
 # One color for the whole curve (eink), or None: each segment takes its band's color
 CURVE_COLOR = THEME["curve"]
 
-
-def bar_targets(db_vals, dt, out):
-    """Band levels (dB) -> bar heights 0..1 in `out`, with the auto-gain scale.
-
-    The top follows the loudest band (fast up, TOP_RELEASE_DB_PER_S down). Each bar
-    starts at max(top - DISPLAY_RANGE_DB, its noise gate), so the mic's own noise
-    never draws a bar, and spans at least MIN_SPAN_DB.
-    """
-    global scale_top_db
-    peak = float(db_vals.max()) + TOP_HEADROOM_DB
-    if peak > scale_top_db:
-        scale_top_db += TOP_ATTACK * (peak - scale_top_db)
-    else:
-        scale_top_db -= TOP_RELEASE_DB_PER_S * dt
-    scale_top_db = max(scale_top_db, float(band_gate_db.max()))
-    bottom = np.maximum(scale_top_db - DISPLAY_RANGE_DB, band_gate_db)
-    span = np.maximum(scale_top_db - bottom, MIN_SPAN_DB)
-    np.clip((db_vals - bottom) / span, 0, 1, out=out)
 
 # --- LAYOUT (fixed for the session: the screen size never changes) ---
 # Designed for 1920x1080: every size scales with the screen height, so the layout
@@ -725,10 +630,8 @@ def render_text(font, text, color):
 
 
 def _freq_to_x(f):
-    pos = NUM_BANDS * (np.log10(f) - np.log10(max(1.0, MIN_FREQ))) / (
-        np.log10(MAX_FREQ) - np.log10(max(1.0, MIN_FREQ))
-    )
-    return start_x + pos * (bar_width + bar_spacing)
+    # From the real band edges: the bass bars are wider than a log step
+    return start_x + analyzer.band_position(f) * (bar_width + bar_spacing)
 
 
 def build_static_layer(size, top=0):
@@ -802,7 +705,7 @@ perf.mark("display_ready")  # PERF
 static_layer = None
 build_legend()
 no_mic_icon = build_no_mic_icon()
-slope_info = f"{SLOPE_DB_PER_OCTAVE}dB SL" if SLOPE_DB_PER_OCTAVE != 0 else "RAW"
+slope_info = f"{spectrum.SLOPE_DB_PER_OCTAVE:g}dB SL" if spectrum.SLOPE_DB_PER_OCTAVE != 0 else "RAW"
 badge_surface = font_tiny.render(f"FAST RESPONSE | SLOPE: {slope_info}", True, THEME["badge"])
 
 # --- MICROPHONE STREAM ---
@@ -820,7 +723,7 @@ def open_stream():
     Returns the stream, or None (the caller retries every OPEN_RETRY_S seconds:
     the orchestrator may still hold the mic for a moment after a mode switch).
     """
-    global stream_channels, stream_rate, meter, last_open_error, open_attempts, CAPTURE_BITS
+    global stream_channels, stream_rate, meter, analyzer, last_open_error, open_attempts, CAPTURE_BITS
     open_attempts += 1
     verbose = open_attempts == 1
     try:
@@ -853,7 +756,7 @@ def open_stream():
           f"index {index}, using channel {MIC_CHANNEL if stream_channels > 1 else 0}")
     last_open_error = None
     meter = dsp.LevelMeter(stream_rate, **METER_SETTINGS)
-    build_rate_tables(stream_rate)
+    analyzer = spectrum.Spectrum(stream_rate)
     audio_buffer[:] = 0
     return new_stream
 
@@ -1128,28 +1031,18 @@ while running:
             last_level_send = current_time
 
         # Slide the analysis buffer (in place, no new allocation)
-        n = min(len(new_data), FFT_SIZE)
+        n = min(len(new_data), len(audio_buffer))
         audio_buffer[:-n] = audio_buffer[n:]
         audio_buffer[-n:] = new_data[-n:]
 
-        # --- SPECTRUM (big FFT on 1 frame out of FFT_EVERY) ---
+        # --- SPECTRUM: treble on every frame (short FFT, sharp hits), bass and
+        # mids on 1 frame out of FFT_EVERY (long FFT, fine detail) ---
         if frame_count % FFT_EVERY == 0:
-            fft_complex = np.fft.rfft(audio_buffer * fft_window)
-            # DC/VLF Removal + Nyquist cleanup (pre-computed masks)
-            fft_complex[_vlf_mask] = 0
-            fft_complex[_nyquist_mask] = 0
-            power = fft_complex.real**2 + fft_complex.imag**2
-            # Mean power of each band (cumulative sum: bands may share a bin)
-            cumulative = np.concatenate(([0.0], np.cumsum(power)))
-            band_power = (cumulative[band_stops] - cumulative[band_starts]) / band_counts
-            # Band level in dB (RMS of its bins). No calibration offset: the noise
-            # gates are in raw mic units, they must not move when the dBA number
-            # is calibrated.
-            db_vals = (10 * np.log10(np.maximum(band_power, 1e-18))
-                       + band_db_adjust + band_db_shaping)
-            fft_dt = 0.0 if last_fft_time is None else min(current_time - last_fft_time, 1.0)
-            last_fft_time = current_time
-            bar_targets(db_vals, fft_dt, current_bar_targets)
+            analyzer.update_long(audio_buffer)
+        analyzer.update_short(audio_buffer)
+        fft_dt = 0.0 if last_fft_time is None else min(current_time - last_fft_time, 1.0)
+        last_fft_time = current_time
+        analyzer.bar_targets(fft_dt, current_bar_targets)
         frame_count += 1
 
         # Visual smoothing: fast rise, exponential decay

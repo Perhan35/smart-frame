@@ -60,20 +60,25 @@ def meter_settings(audio_config):
     }
 
 
-def mic_compensation_gains(rate, n, response=INMP441_RESPONSE):
-    """Linear gain for each rfft bin of an n-point frame that undoes the mic's
-    frequency response (0 dB at 1 kHz, so the calibration offset stays valid).
+def mic_boost_db(freqs, response=INMP441_RESPONSE):
+    """dB to add at each frequency to undo the mic's frequency response (0 dB at
+    1 kHz, so the calibration offset stays valid), capped at MAX_MIC_BOOST_DB.
 
     The response is interpolated in log frequency and held flat beyond its first
     and last points (no extrapolation of the roll-offs).
     """
-    f = np.fft.rfftfreq(n, 1.0 / rate)
     log_hz = np.log10([p[0] for p in response])
     resp_db = np.array([p[1] for p in response], dtype=np.float64)
     resp_db -= np.interp(3.0, log_hz, resp_db)  # 1 kHz -> 0 dB
-    at_bins = np.interp(np.log10(np.maximum(f, 1e-10)), log_hz, resp_db)
-    boost_db = np.minimum(-at_bins, MAX_MIC_BOOST_DB)
-    return 10 ** (boost_db / 20.0)
+    at = np.interp(np.log10(np.maximum(np.asarray(freqs, dtype=np.float64), 1e-10)),
+                   log_hz, resp_db)
+    return np.minimum(-at, MAX_MIC_BOOST_DB)
+
+
+def mic_compensation_gains(rate, n, response=INMP441_RESPONSE):
+    """Linear gain for each rfft bin of an n-point frame that undoes the mic's
+    frequency response (see mic_boost_db)."""
+    return 10 ** (mic_boost_db(np.fft.rfftfreq(n, 1.0 / rate), response) / 20.0)
 
 
 def capture_bits(audio_config):
