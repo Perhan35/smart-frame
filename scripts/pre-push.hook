@@ -1,0 +1,9 @@
+#!/bin/sh
+# Blocks the push if the CI checks fail (lint + tests). Bypass (not recommended): git push --no-verify
+set -e
+cd "$(git rev-parse --show-toplevel)"
+scripts/lint.sh
+PYTHON=python3
+[ -x .venv/bin/python ] && PYTHON=.venv/bin/python
+echo "[pre-push] tests..."
+"$PYTHON" -m pytest -q

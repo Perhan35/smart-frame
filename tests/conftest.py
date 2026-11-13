@@ -25,8 +25,21 @@ os.environ["SMARTFRAME_CONFIG"] = str(_TMP / "config.yaml")
 os.environ["SMARTFRAME_CACHE"] = str(_TMP / "cache.json")
 
 # PyAudio needs PortAudio (not installed in CI). The tests never open a microphone:
-# a stub is enough to import smartframe.audio_monitor.
+# they always use this stub, even where PyAudio is installed, so that they behave
+# the same on a dev machine as in CI. Add here any pyaudio name the code uses.
+_PYAUDIO_STUB = types.SimpleNamespace(
+    PyAudio=None,
+    paInt16=8,
+    paInt32=2,
+    paSampleFormatNotSupported=-9994,
+    paDeviceUnavailable=-9985,
+)
 try:
-    import pyaudio  # noqa: F401
+    import pyaudio as _real_pyaudio
 except ImportError:
-    sys.modules["pyaudio"] = types.SimpleNamespace(PyAudio=None, paInt16=8, paInt32=2)
+    _real_pyaudio = None
+if _real_pyaudio is not None:  # The stub must keep PyAudio's real values
+    for _name, _value in vars(_PYAUDIO_STUB).items():
+        _real = getattr(_real_pyaudio, _name)
+        assert _value is None or _value == _real, f"pyaudio stub: {_name}={_value}, real {_real}"
+sys.modules["pyaudio"] = _PYAUDIO_STUB

@@ -1,0 +1,8 @@
+# Opens a PR when a GitHub Action used by the workflows has a new version
+# (e.g. actions/checkout moving to a new Node.js runtime).
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly
