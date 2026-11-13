@@ -167,7 +167,7 @@ The setup script creates `config.yaml` from `config.example.yaml` automatically.
 - The big number on the audio screen is more reactive (instant rise, short hold), so it can read a little above the Home Assistant value.
 - It is a relative dBA: accurate near the calibration point(s), indicative far from them. Readings close to or below `noise_floor_dba` are indicative only.
 - Limits: the INMP441 is not flat in frequency (less bass), the reference is often a phone app (itself ±2-3 dB), and the ALSA chain may change the scale. Expect a few dB of error, not a certified sound level meter.
-- The spectrum bars have their own visual scale: they do not move when you change the calibration.
+- The spectrum bars have their own scale, independent of the calibration. It adapts to the volume: the loudest band sets the top, so quiet music still shows its full shape. Each bar starts just above the mic's own noise in its band, so a silent room draws (almost) nothing, and a band that is not louder than that noise stays empty.
 
 ### Very quiet rooms
 
