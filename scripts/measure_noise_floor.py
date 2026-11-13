@@ -16,7 +16,8 @@ How to use it:
   5. Start the service again:  sudo systemctl start smartframe
 
 If you cannot get a quiet enough room, use the INMP441 datasheet value instead
-(about 33 dBA: 94 dB SPL reference - 61 dBA SNR) and type it in config.yaml.
+(about 33 dBA: 94 dB SPL reference - 61 dBA SNR) and type it in config.yaml. A measured
+value is better: real mics differ from the datasheet by a dB or two.
 """
 
 import os
@@ -31,7 +32,7 @@ import yaml
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 from smartframe import config_edit, dsp  # noqa: E402
-from smartframe.audio_input import find_input_device, pa_format  # noqa: E402
+from smartframe.audio_input import find_input_device, open_input  # noqa: E402
 
 CONFIG_PATH = ROOT / "config.yaml"
 CHUNK = 4096
@@ -70,10 +71,13 @@ def main():
     settings["noise_floor_dba"] = None  # Measure the raw floor, without removing the old one
     bits = dsp.capture_bits(audio)
     channel = dsp.channel_index(audio.get("mic_channel", "left"))
-    if audio.get("calibration_offset_db") in (None, 0):
-        print("Warning: audio.calibration_offset_db is not calibrated yet (the theoretical "
-              f"{settings['calibration_offset_db']:g} dB is used). Calibrate first, or the "
-              "floor will not match the levels you see.")
+    offset = audio.get("calibration_offset_db")
+    if offset in (None, 0) or float(offset) == dsp.DEFAULT_CALIBRATION_OFFSET_DB:
+        # config.example.yaml ships the theoretical value, so "set" is not "calibrated".
+        print("Warning: audio.calibration_offset_db still has the theoretical value "
+              f"({settings['calibration_offset_db']:g} dB), so it looks uncalibrated. "
+              "Calibrate first (scripts/calibrate.py), or the floor will not match the "
+              "levels you see.")
 
     # Hide ALSA/JACK probing noise
     devnull = os.open(os.devnull, os.O_WRONLY)
@@ -92,9 +96,9 @@ def main():
             print("No microphone found.")
             return 1
         channels, rate = dsp.input_format(info)
-        stream = p.open(format=pa_format(bits), channels=channels, rate=rate, input=True,
-                        input_device_index=index, frames_per_buffer=CHUNK)
-        print(f"Microphone: {info.get('name')} ({channels} ch, {rate} Hz)")
+        stream, bits = open_input(p, bits, warn=print, channels=channels, rate=rate,
+                                  input_device_index=index, frames_per_buffer=CHUNK)
+        print(f"Microphone: {info.get('name')} ({channels} ch, {rate} Hz, {bits} bits)")
         print("Silence please... starting in 3 s.")
         time.sleep(3)
         stream.read(CHUNK, exception_on_overflow=False)  # Drop the start-up click

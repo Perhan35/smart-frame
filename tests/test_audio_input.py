@@ -1,4 +1,6 @@
-from smartframe.audio_input import device_key, find_input_device, resolve_device
+import pytest
+
+from smartframe.audio_input import device_key, find_input_device, open_input, resolve_device
 
 
 class FakePyAudio:
@@ -58,3 +60,58 @@ def test_find_input_device_prefers_the_i2s_mic():
         {"name": f"{MIC} (hw:1,0)", "maxInputChannels": 2},
     ])
     assert find_input_device(p)[0] == 1
+
+
+class FakeStreamOpener:
+    """p.open() that refuses some formats, like a driver without 32-bit support."""
+
+    def __init__(self, refused_formats, busy=False):
+        self.refused = set(refused_formats)
+        self.busy = busy
+        self.formats = []
+
+    def open(self, format, **kwargs):
+        import pyaudio
+
+        self.formats.append(format)
+        if self.busy:  # PyAudio raises OSError(text, PortAudio code)
+            raise OSError("Device unavailable", pyaudio.paDeviceUnavailable)
+        if format in self.refused:
+            raise OSError("Invalid sample format", pyaudio.paSampleFormatNotSupported)
+        return ("stream", format)
+
+
+def test_open_input_falls_back_to_16_bits_when_32_is_refused():
+    pyaudio = pytest.importorskip("pyaudio")
+    p = FakeStreamOpener({pyaudio.paInt32})
+    warnings = []
+    stream, bits = open_input(p, 32, warn=warnings.append, rate=48000)
+    assert bits == 16
+    assert stream == ("stream", pyaudio.paInt16)
+    assert p.formats == [pyaudio.paInt32, pyaudio.paInt16]
+    assert len(warnings) == 1
+
+
+def test_open_input_keeps_32_bits_when_accepted():
+    pyaudio = pytest.importorskip("pyaudio")
+    p = FakeStreamOpener(set())
+    stream, bits = open_input(p, 32, warn=lambda m: pytest.fail(m), rate=48000)
+    assert bits == 32
+    assert p.formats == [pyaudio.paInt32]
+
+
+def test_open_input_does_not_retry_a_16_bit_failure():
+    pyaudio = pytest.importorskip("pyaudio")
+    p = FakeStreamOpener({pyaudio.paInt16})
+    with pytest.raises(OSError):
+        open_input(p, 16, rate=48000)
+    assert p.formats == [pyaudio.paInt16]
+
+
+def test_open_input_does_not_fall_back_when_the_mic_is_busy():
+    # Busy is not a refused format: the caller retries later, still in 32 bits
+    pyaudio = pytest.importorskip("pyaudio")
+    p = FakeStreamOpener(set(), busy=True)
+    with pytest.raises(OSError):
+        open_input(p, 32, warn=lambda m: pytest.fail(m), rate=48000)
+    assert p.formats == [pyaudio.paInt32]

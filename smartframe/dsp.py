@@ -77,8 +77,9 @@ def mic_compensation_gains(rate, n, response=INMP441_RESPONSE):
 
 
 def capture_bits(audio_config):
-    """audio.capture_bits: 32 keeps the mic's full 24-bit resolution, 16 by default."""
-    return 32 if str((audio_config or {}).get("capture_bits", 16)).strip() == "32" else 16
+    """audio.capture_bits: 32 (default) keeps the mic's full 24-bit resolution; 16 only
+    when asked. A driver that refuses 32 falls back to 16 (audio_input.open_input)."""
+    return 16 if str((audio_config or {}).get("capture_bits", 32)).strip() == "16" else 32
 
 
 def a_weighting_gains(rate, n):

@@ -11,7 +11,7 @@ import time
 import pyaudio
 
 from smartframe import cache, dsp, mqtt_link, supervisor
-from smartframe.audio_input import device_key, find_input_device, pa_format, resolve_device
+from smartframe.audio_input import device_key, find_input_device, open_input, resolve_device
 from smartframe.settings import AUDIO_CONFIG, MQTT_DBA_STATE_TOPIC, MQTT_LAFMAX_STATE_TOPIC
 
 # Levels sent by the audio mode through its private pipe: (LAeq, LAFmax) once per
@@ -149,11 +149,11 @@ class AudioMonitor(threading.Thread):
         if idx is None:
             return None, 0, None
         channels, rate = dsp.input_format(info)
-        stream = p.open(
-            format=pa_format(self.bits),
+        stream, self.bits = open_input(
+            p,
+            self.bits,
             channels=channels,
             rate=rate,
-            input=True,
             input_device_index=idx,
             frames_per_buffer=self.CHUNK,
         )

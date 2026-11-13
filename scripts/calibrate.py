@@ -95,7 +95,7 @@ class Mic:
 
     def __init__(self, audio):
         import pyaudio
-        from smartframe.audio_input import find_input_device, pa_format
+        from smartframe.audio_input import find_input_device, open_input
 
         # Hide ALSA/JACK probing noise
         devnull = os.open(os.devnull, os.O_WRONLY)
@@ -116,9 +116,9 @@ class Mic:
         self.bits = dsp.capture_bits(audio)
         self.channel = dsp.channel_index(audio.get("mic_channel", "left"))
         self.channels, self.rate = dsp.input_format(info)
-        self.stream = self.p.open(format=pa_format(self.bits), channels=self.channels,
-                                  rate=self.rate, input=True, input_device_index=index,
-                                  frames_per_buffer=CHUNK)
+        self.stream, self.bits = open_input(self.p, self.bits, warn=print,
+                                            channels=self.channels, rate=self.rate,
+                                            input_device_index=index, frames_per_buffer=CHUNK)
         print(f"Microphone: {info.get('name')} ({self.channels} ch, {self.rate} Hz, "
               f"{self.bits} bits)")
 

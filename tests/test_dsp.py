@@ -99,9 +99,11 @@ def test_meter_settings_defaults():
 
 
 def test_capture_bits():
-    assert dsp.capture_bits({}) == 16
+    assert dsp.capture_bits({}) == 32
     assert dsp.capture_bits({"capture_bits": 32}) == 32
-    assert dsp.capture_bits({"capture_bits": 24}) == 16
+    assert dsp.capture_bits({"capture_bits": 16}) == 16
+    assert dsp.capture_bits({"capture_bits": "16"}) == 16
+    assert dsp.capture_bits({"capture_bits": 24}) == 32
 
 
 def test_mic_compensation_is_0_db_at_1khz_and_undoes_the_roll_offs():

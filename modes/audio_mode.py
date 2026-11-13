@@ -16,7 +16,7 @@ from contextlib import contextmanager
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 from smartframe import dsp  # noqa: E402
 from smartframe import perf  # noqa: E402  # PERF
-from smartframe.audio_input import pa_format, resolve_device  # noqa: E402
+from smartframe.audio_input import open_input, resolve_device  # noqa: E402
 from smartframe import config_check  # noqa: E402
 perf.mark("imports_done")  # PERF
 
@@ -43,7 +43,7 @@ DEVICE_INDEX = None
 THRESHOLD_WARNING = 60
 THRESHOLD_ERROR = 85
 METER_SETTINGS = dsp.meter_settings({})
-CAPTURE_BITS = 16
+CAPTURE_BITS = 32
 MIC_CHANNEL = 0
 SHOW_DEBUG = True  # CPU stats + "FAST RESPONSE | SLOPE" badge
 RENDER_SCALE = 1.0  # < 1: draw at a lower resolution and let SDL scale it up
@@ -169,7 +169,6 @@ BACKGROUND = THEME["background"]
 CHUNK_READ = 1536  # Optimized speed (~31Hz updates)
 FFT_SIZE = 8192  # High-fidelity 8k FFT for maximum visual resolution
 FFT_EVERY = 2  # Big FFT on 1 frame out of 2 (~15 Hz): the bars smooth in between
-FORMAT = pa_format(CAPTURE_BITS)
 OPEN_RETRY_S = 3.0  # Retry opening the mic this often (it may still be held)
 # Format of the open stream: set from the device by open_stream()
 stream_channels = 1
@@ -791,7 +790,7 @@ def open_stream():
     Returns the stream, or None (the caller retries every OPEN_RETRY_S seconds:
     the orchestrator may still hold the mic for a moment after a mode switch).
     """
-    global stream_channels, stream_rate, meter, last_open_error, open_attempts
+    global stream_channels, stream_rate, meter, last_open_error, open_attempts, CAPTURE_BITS
     open_attempts += 1
     verbose = open_attempts == 1
     try:
@@ -800,11 +799,13 @@ def open_stream():
             raise RuntimeError("No suitable audio input devices found with capture capabilities.")
         # Some I2S drivers only accept 2 channels for a mono mic: one is picked later.
         stream_channels, stream_rate = dsp.input_format(info)
-        new_stream = p.open(
-            format=FORMAT,
+        # A driver that refuses 32 bits falls back to 16 (kept for the next opens).
+        new_stream, CAPTURE_BITS = open_input(
+            p,
+            CAPTURE_BITS,
+            warn=print,
             channels=stream_channels,
             rate=stream_rate,
-            input=True,
             input_device_index=index,
             frames_per_buffer=CHUNK_READ,
         )

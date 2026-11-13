@@ -15,6 +15,35 @@ def pa_format(bits):
     return pyaudio.paInt32 if bits == 32 else pyaudio.paInt16
 
 
+def _pa_error_code(error):
+    """PortAudio error code of a PyAudio exception (raised as OSError(text, code))."""
+    args = getattr(error, "args", ())
+    return args[1] if len(args) > 1 and isinstance(args[1], int) else None
+
+
+def open_input(p, bits, warn=logging.warning, **kwargs):
+    """Open an input stream with `bits` (16 or 32). If the driver refuses 32-bit
+    capture, open it in 16 bits instead (same calibration, see dsp.pick_channel).
+
+    `kwargs` go to p.open() (channels, rate, input_device_index...). `warn` reports
+    the fallback. Returns (stream, bits actually used).
+    """
+    import pyaudio
+
+    try:
+        return p.open(format=pa_format(bits), input=True, **kwargs), bits
+    except Exception as e:
+        # A busy mic (still held by another process) is not a refused format:
+        # let the caller retry in 32 bits rather than keep 16 for good.
+        if bits != 32 or _pa_error_code(e) == pyaudio.paDeviceUnavailable:
+            raise
+        refused = e
+    stream = p.open(format=pa_format(16), input=True, **kwargs)  # Raises if 16 fails too
+    warn(f"The microphone refused 32-bit capture ({refused}): using 16 bits. "
+         "Set audio.capture_bits: 16 in config.yaml to skip this try.")
+    return stream, 16
+
+
 def device_key(name):
     """Stable name of a device: ALSA adds "(hw:1,0)", whose card number can change
     between boots (e.g. when a USB device is plugged in)."""

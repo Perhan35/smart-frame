@@ -149,11 +149,11 @@ The setup script creates `config.yaml` from `config.example.yaml` automatically.
   - `threshold_db_error`: Volume (in dB) where the dB text will turn red (default: 85).
   - `device_index`: (Optional) Manual ALSA microphone index. If left blank, the SmartFrame will automatically discover and cache the best device (e.g. INMP441 I2S) for you. When set, it always wins over auto-discovery (`scripts/list_audio_devices.py` helps you pick it).
   - `mic_channel`: `"left"` when the mic's L/R pin goes to GND (as in the wiring above), `"right"` when it goes to 3.3V. On a stereo I2S device only this channel is used (averaging with the silent one would lose 6 dB).
-  - `capture_bits`: `16` (default) or `32`. 32 keeps the full 24-bit resolution of the INMP441 (better in very quiet rooms). The calibration stays the same. Go back to 16 if the microphone does not open.
+  - `capture_bits`: `32` (default) or `16`. 32 keeps the full 24-bit resolution of the INMP441 (a little better in very quiet rooms). The calibration stays the same. If the driver refuses 32 bits, the frame uses 16 by itself and says so in the log; set `16` to skip that try.
   - `calibration_offset_db`: added to every reading. The default, `33`, is the theoretical value for the INMP441 (datasheet). Fine-tune it as described in [Calibrating the sound level](#calibrating-the-sound-level).
   - `calibration_slope`: (Optional) second calibration point. `1.0` = offset only.
   - `mic_compensation`: `true` undoes the INMP441's typical frequency response (the measured curve of its datasheet: about −11 dB at 20 Hz, −3.6 dB at 50 Hz, flat from 300 Hz to 5 kHz, −3.7 dB at 17.7 kHz). It changes the dBA and dBZ numbers, not the spectrum bars. It is a typical curve, so your own mic can still differ by a dB or two. Default `false`. Calibrate again after changing it.
-  - `noise_floor_dba`: (Optional) the mic's own noise in dBA, removed from every reading in energy. Set it **after** calibrating, either with `scripts/measure_noise_floor.py` (stop the service first, measure in a very quiet room) or with the INMP441 datasheet value (about 33). Leave it empty for no correction.
+  - `noise_floor_dba`: (Optional) the mic's own noise in dBA, removed from every reading in energy. Set it **after** calibrating, either with `scripts/measure_noise_floor.py` (stop the service first, measure in a very quiet room) or with the INMP441 datasheet value (about 33; a measured value is better, since mics differ by a dB or two). Leave it empty for no correction. See [Very quiet rooms](#very-quiet-rooms).
   - `show_debug`: `true` (default) shows the CPU stats and the "FAST RESPONSE | SLOPE" line on the audio screen. `false` hides them.
   - `theme`: `"neon"` (default, colors on black) or `"eink"` (soft grays on black, monochrome and calm, for the e-ink look; orange and red stay for loud levels).
   - `font`: empty (default) = the theme's own font: pygame's bold font for `neon` (the original look), Barlow (shipped in `assets/fonts/`) for `eink`. `"default"` or `"barlow"` forces one of them with any theme.
@@ -168,6 +168,15 @@ The setup script creates `config.yaml` from `config.example.yaml` automatically.
 - It is a relative dBA: accurate near the calibration point(s), indicative far from them. Readings close to or below `noise_floor_dba` are indicative only.
 - Limits: the INMP441 is not flat in frequency (less bass), the reference is often a phone app (itself ±2-3 dB), and the ALSA chain may change the scale. Expect a few dB of error, not a certified sound level meter.
 - The spectrum bars have their own visual scale: they do not move when you change the calibration.
+
+### Very quiet rooms
+
+The INMP441 hisses by itself at about 33 dBA (datasheet: 94 dB SPL reference − 61 dBA SNR). It cannot hear a room quieter than that hiss, so expect these limits:
+
+- **The measured floor includes the room.** `scripts/measure_noise_floor.py` hears the mic's hiss plus the room. In a room at 20-25 dBA the result is still about 32 dBA, almost all of it hiss. That is the right value to store. But in that same room, "reading − floor" is close to zero, so the frame shows the floor minus 10 dB (the most it ever removes): a value in the low 20s that looks right but is not a real measurement.
+- **The reference has the same limit.** A phone app is usually not reliable below about 30 dBA: the phone's own mic hisses too. Do not calibrate or judge the floor against a phone reading in a very quiet room.
+- **More bits help only a little.** `capture_bits: 32` lowers the digital noise, which is already far below the mic's hiss: the gain is a fraction of a dB.
+- **Only a quieter microphone really helps.** For this kind of MEMS mic, self-noise ≈ 94 − SNR (in dBA, from the datasheet). To read about 25 dBA with confidence, the mic's self-noise should be well below that (about 18 dBA or less), which usually means a USB measurement microphone rather than a small I2S MEMS mic.
 
 ### Calibrating the sound level
 
