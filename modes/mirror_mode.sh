@@ -91,9 +91,21 @@ if [ "$BROWSER_TYPE" = "cog" ]; then
     # Cog flags:
     #   --platform=wl          Wayland backend (labwc)
     #   --webprocess-failure=restart  Auto-restart on WebProcess crash (up to 5 retries)
-    #   --bg-color=black       Black background while loading (matches kiosk aesthetic)
+    #   --bg-color             Black while loading, or transparent when the loading
+    #                          picture is shown under the browser (see below)
     #   --enable-page-cache=false  Disable in-memory back/forward cache to save RAM on 512MB device
-    COG_FLAGS="--platform=wl --webprocess-failure=restart --bg-color=black --enable-page-cache=false"
+    # Loading picture: swaybg draws it on the background layer, under the browser
+    # window, and Cog starts transparent. The picture then shows from the first
+    # second until the page arrives (MagicMirror then paints its black background:
+    # its modules show ~10 s later). Wayland only; without swaybg (or the picture),
+    # the screen stays black while loading.
+    SPLASH_IMAGE="$DIR/../assets/mirror_loading.png"
+    COG_BG="black"
+    if [ -n "$WAYLAND_DISPLAY" ] && [ -f "$SPLASH_IMAGE" ] && command -v swaybg &> /dev/null; then
+        USE_SPLASH=1
+        COG_BG="#00000000"
+    fi
+    COG_FLAGS="--platform=wl --webprocess-failure=restart --bg-color=$COG_BG --enable-page-cache=false"
 
     # Conditional logging for debugging: Cog core messages (load events, errors, warnings)
     # and the page's console messages (MagicMirror logs, JavaScript errors) in the journal
@@ -192,6 +204,14 @@ fi
 PID=""
 DISMISS_PID=""
 
+# Loading picture under the browser (see USE_SPLASH above). It stays up while the
+# mode runs (a few MB), hidden by the page, and goes with the mode's process group.
+SPLASH_PID=""
+if [ "${USE_SPLASH:-0}" = "1" ]; then
+    swaybg -m fit -c 000000 -i "$SPLASH_IMAGE" &> /dev/null &
+    SPLASH_PID=$!
+fi
+
 # Start the browser on $1 in the background: sets PID (and DISMISS_PID for Chromium)
 start_browser() {
     if [ "$SMARTFRAME_DEBUG" = "1" ]; then
@@ -234,7 +254,7 @@ stop_browser() {
 }
 
 # Cleanup browser, dismiss helper, and unclutter on exit (do NOT delete persistent profiles)
-trap 'echo "Cleaning up..."; kill ${PID:-} ${DISMISS_PID:-} $UNCLUTTER_PID 2>/dev/null; wait ${PID:-} 2>/dev/null' EXIT
+trap 'echo "Cleaning up..."; kill ${PID:-} ${DISMISS_PID:-} ${SPLASH_PID:-} $UNCLUTTER_PID 2>/dev/null; wait ${PID:-} 2>/dev/null' EXIT
 
 # ──────────────────────────────────────────────
 #  Wait screen while the MagicMirror server does not answer
