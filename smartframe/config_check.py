@@ -16,6 +16,7 @@ FONTS = ("default", "barlow")
 SECTIONS = ("mqtt", "magic_mirror", "audio")
 
 _SCREEN_SIZE = re.compile(r"^\s*\d{2,5}\s*x\s*\d{2,5}\s*$")
+_TIME = re.compile(r"^\s*(\d{1,2}):(\d{2})\s*$")
 
 # (section or None for top level, key)
 _BOOLEANS = (
@@ -39,6 +40,7 @@ _NUMBERS = (
     ("audio", "noise_floor_dba", 0, 120, True),
     ("audio", "render_scale", 0.25, 1.0, True),
     ("audio", "pixel_shift_minutes", 0, 1440, True),
+    ("magic_mirror", "freeze_restart_minutes", 0, 1440, True),
 )
 
 # (section, key, allowed values, compared in lower case as text)
@@ -48,6 +50,29 @@ _CHOICES = (
     ("audio", "theme", THEMES),
     ("audio", "font", FONTS),
 )
+
+
+def parse_daily_time(value):
+    """config value -> (hour, minute), or None when the daily restart is off.
+
+    "04:00" -> (4, 0). YAML reads an unquoted 4:30 (no leading zero) as the
+    number 270 (base 60), which is also the minutes since midnight: accepted too. Empty, null and false
+    turn it off. Anything else -> ValueError.
+    """
+    if value is None or value is False or (isinstance(value, str) and not value.strip()):
+        return None
+    if isinstance(value, bool):
+        raise ValueError(f"{value!r} is not a time like \"04:00\"")
+    if isinstance(value, int):
+        if 0 <= value < 24 * 60:
+            return divmod(value, 60)
+        raise ValueError(f"{value!r} is not a time like \"04:00\"")
+    match = _TIME.match(str(value))
+    if match:
+        hour, minute = int(match.group(1)), int(match.group(2))
+        if hour < 24 and minute < 60:
+            return hour, minute
+    raise ValueError(f"{value!r} is not a time like \"04:00\"")
 
 
 def available_modes(modes_dir):
@@ -163,6 +188,16 @@ def check(config, modes=None):
             drop("audio", "device_index", f"{index!r} is not a device number (0, 1, 2...) or null")
         else:
             audio["device_index"] = int(number)
+
+    mirror = where("magic_mirror")
+    if "daily_restart" in mirror:
+        try:
+            daily = parse_daily_time(mirror["daily_restart"])
+        except ValueError as e:
+            drop("magic_mirror", "daily_restart", str(e))
+        else:
+            # "HH:MM", or "" for "never" (a missing key means the default time)
+            mirror["daily_restart"] = "" if daily is None else "%02d:%02d" % daily
 
     size = clean.get("screen_size")
     if size is not None and not _SCREEN_SIZE.match(str(size)):

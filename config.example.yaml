@@ -34,6 +34,8 @@ restore_display_settings_on_power_on: true # Send brightness/contrast/color agai
 
 magic_mirror:
   url: "http(s)://[MAGIC_MIRROR_SERVER_IP_ADDRESS]:[PORT]" # Replace with your MagicMirror server URL
+  freeze_restart_minutes: 3 # Restart the browser when the screen has not changed for this long (frozen page). 0 = never
+  daily_restart: "04:00" # Restart the browser once a day at this time (frees its memory). Keep the quotes. "" = never
 
 audio:
   device_index: null # Change to an integer if you need to select a specific microphone index

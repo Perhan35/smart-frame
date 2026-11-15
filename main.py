@@ -7,6 +7,7 @@ The work is done in the smartframe/ package:
   display        screen power, brightness, contrast, color, input (DDC/CI...)
   audio_monitor  microphone choice and the dBA sensor in every mode
   supervisor     mode processes, watchdog, run state, audio preload
+  screen_watch   mirror mode: restart a frozen browser, daily restart
   mqtt_link      MQTT client, Home Assistant discovery, incoming commands
   worker         the command queue, run one command at a time
 This file starts them and runs the main loop (watchdog + diagnostics).
@@ -22,7 +23,7 @@ import time
 
 from smartframe import perf  # PERF
 from smartframe import settings  # First: loads config.yaml and sets up logging
-from smartframe import audio_monitor, display, mqtt_link, supervisor, worker
+from smartframe import audio_monitor, display, mqtt_link, screen_watch, supervisor, worker
 
 perf.mark("imports_done")  # PERF
 
@@ -143,6 +144,9 @@ def main():
 
     # 5. Start background dBA monitor thread
     audio_monitor.start()
+
+    # 6. Mirror mode: frozen page check and daily restart (own thread)
+    screen_watch.start()
 
     try:
         main_loop()

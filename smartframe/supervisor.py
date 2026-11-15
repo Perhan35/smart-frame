@@ -96,10 +96,12 @@ def stop_current_mode():
         compositor.kill_group(current_process, grace=0.5 if started_browser else 2.0)
         current_process = None
 
-        # Browsers that escaped the group (NOT labwc: it is reused). "chromium-browse"
-        # is "chromium-browser" cut to the 15-character process name limit.
+        # Browsers that escaped the group (NOT labwc: it is reused), with Cog's web
+        # page and network processes. Names are cut to 15 characters by the kernel
+        # ("chromium-browser" -> "chromium-browse", "WPENetworkProcess" -> "WPENetworkProce").
         if started_browser:
-            compositor.kill_own(["chromium", "chromium-browse", "cog"])
+            compositor.kill_own(["chromium", "chromium-browse", "cog", "WPEWebProcess",
+                                 "WPENetworkProce"])
         perf.mark("stop: browser cleanup done")  # PERF
 
         # Brief settle for the client process to release Wayland resources
@@ -237,6 +239,28 @@ def start_mode(mode, restart=False):
         return
     _mode_started_at = time.monotonic()
     perf.mark("process_launched")  # PERF
+
+
+def refresh_mode(mode, reason):
+    """Restart the running mode's process (call with mode_lock held): frozen browser
+    or daily restart (screen_watch). Not a crash: no retry is counted, the screen
+    stays on and labwc is kept. Ignored if the mode changed in the meantime."""
+    global current_process, _mode_started_at, _last_switch_at
+    proc = current_process
+    if mode != current_mode or proc is None or proc.poll() is not None:
+        return
+    logging.warning(f"Restarting '{mode}' mode: {reason}.")
+    _last_switch_at = time.monotonic()
+    _set_run_state(RUN_STARTING)
+    _mode_started_at = time.monotonic()
+    stop_current_mode()
+    try:
+        current_process = _launch_mode(mode, mode)
+    except Exception as e:
+        current_process = None
+        _mode_failed(f"could not start ({e})")
+        return
+    _mode_started_at = time.monotonic()
 
 
 def _launch_mode(mode, previous_mode):

@@ -181,10 +181,23 @@ fi
 # Determine display strategy
 if [ -n "$WAYLAND_DISPLAY" ]; then
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] Using Wayland display: $WAYLAND_DISPLAY"
+elif [ -n "$DISPLAY" ]; then
+    echo "Using X11 display: $DISPLAY"
+else
+    echo "Error: No Wayland/X11 display environment found."
+    echo "Note: This script is intended to be run within an existing session or wrapped by labwc."
+    exit 1
+fi
+
+PID=""
+DISMISS_PID=""
+
+# Start the browser on $1 in the background: sets PID (and DISMISS_PID for Chromium)
+start_browser() {
     if [ "$SMARTFRAME_DEBUG" = "1" ]; then
-        "${FULL_CMD[@]}" "$MIRROR_URL" &
+        "${FULL_CMD[@]}" "$1" &
     else
-        "${FULL_CMD[@]}" "$MIRROR_URL" &> /dev/null &
+        "${FULL_CMD[@]}" "$1" &> /dev/null &
     fi
     PID=$!
 
@@ -193,11 +206,11 @@ if [ -n "$WAYLAND_DISPLAY" ]; then
     if [ "$BROWSER_TYPE" = "chromium" ]; then
         (
             _dismiss_dialog() {
-                if command -v wtype &>/dev/null; then
+                if [ -n "$WAYLAND_DISPLAY" ] && command -v wtype &>/dev/null; then
                     wtype -k Return 2>/dev/null
                 elif command -v xdotool &>/dev/null; then
                     xdotool key Return 2>/dev/null
-                elif command -v ydotool &>/dev/null; then
+                elif [ -n "$WAYLAND_DISPLAY" ] && command -v ydotool &>/dev/null; then
                     ydotool key 28:1 28:0 2>/dev/null
                 fi
             }
@@ -211,36 +224,72 @@ if [ -n "$WAYLAND_DISPLAY" ]; then
         ) &
         DISMISS_PID=$!
     fi
-elif [ -n "$DISPLAY" ]; then
-    echo "Using X11 display: $DISPLAY"
-    if [ "$SMARTFRAME_DEBUG" = "1" ]; then
-        "${FULL_CMD[@]}" "$MIRROR_URL" &
-    else
-        "${FULL_CMD[@]}" "$MIRROR_URL" &> /dev/null &
-    fi
-    PID=$!
-    # Auto-dismiss for Chromium on X11
-    if [ "$BROWSER_TYPE" = "chromium" ]; then
-        (
-            # At 8, 12, 16 and 20 s after launch (see the Wayland branch above)
-            for delay in 8 4 4 4; do
-                sleep "$delay" &
-                wait $!
-                if command -v xdotool &>/dev/null; then
-                    xdotool key Return 2>/dev/null
-                fi
-            done
-        ) &
-        DISMISS_PID=$!
-    fi
-else
-    echo "Error: No Wayland/X11 display environment found."
-    echo "Note: This script is intended to be run within an existing session or wrapped by labwc."
-    exit 1
-fi
+}
+
+stop_browser() {
+    kill $PID ${DISMISS_PID:-} 2>/dev/null
+    wait $PID 2>/dev/null
+    PID=""
+    DISMISS_PID=""
+}
 
 # Cleanup browser, dismiss helper, and unclutter on exit (do NOT delete persistent profiles)
-trap 'echo "Cleaning up..."; kill $PID ${DISMISS_PID:-} $UNCLUTTER_PID 2>/dev/null; wait $PID 2>/dev/null' EXIT
+trap 'echo "Cleaning up..."; kill ${PID:-} ${DISMISS_PID:-} $UNCLUTTER_PID 2>/dev/null; wait ${PID:-} 2>/dev/null' EXIT
+
+# ──────────────────────────────────────────────
+#  Wait screen while the MagicMirror server does not answer
+# ──────────────────────────────────────────────
+# Without it, the browser shows an error page and stays there. Only network
+# failures count as "not answering" (curl: 6 name not found, 7 refused, 28 timeout,
+# 52 empty reply, 56 connection reset). Any HTTP answer, or a TLS problem (which
+# waiting would not fix), opens the page right away. No curl: no check.
+WAIT_RETRY_SECONDS=5
+
+server_down() {
+    command -v curl &> /dev/null || return 1
+    curl -s -o /dev/null --connect-timeout 3 --max-time 5 "$MIRROR_URL"
+    case $? in
+        6|7|28|52|56) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+# The page is passed as a data: URL (no file to read: the browser sandbox may not
+# see this folder). It shows the server's host:port, never the full URL (it may
+# hold a token). The moving dots and the timer also tell screen_watch that the
+# browser is alive.
+wait_page_url() {
+    local host
+    host=$(printf '%s' "$MIRROR_URL" | sed -E 's|^[a-zA-Z]+://||; s|[/?#].*$||; s|^.*@||; s/[^A-Za-z0-9.:_\[\]-]//g')
+    local html='<!doctype html><html><head><meta charset="utf-8"><style>
+html,body{margin:0;height:100%;background:#000;color:#9aa0a6;font:32px sans-serif}
+body{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:24px}
+h1{margin:0;font-weight:300;font-size:56px;color:#e8eaed}
+.dots span{display:inline-block;width:18px;height:18px;margin:0 8px;border-radius:50%;background:#e8eaed;animation:p 1.4s infinite ease-in-out}
+.dots span:nth-child(2){animation-delay:.2s}.dots span:nth-child(3){animation-delay:.4s}
+@keyframes p{0%,80%,100%{opacity:.15}40%{opacity:1}}
+</style></head><body><h1>Waiting for MagicMirror</h1><div class="dots"><span></span><span></span><span></span></div>
+<div>HOST does not answer. Trying again every few seconds.</div><div id="t"></div>
+<script>var s=Date.now();setInterval(function(){var m=Math.floor((Date.now()-s)/60000);document.getElementById("t").textContent=m?"Waiting for "+m+" min":""},5000)</script>
+</body></html>'
+    printf 'data:text/html;base64,%s' "$(printf '%s' "${html//HOST/$host}" | base64 | tr -d '\n')"
+}
+
+if server_down; then
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] MagicMirror does not answer: showing the wait screen, trying again every ${WAIT_RETRY_SECONDS} s."
+    start_browser "$(wait_page_url)"
+    while server_down; do
+        if ! kill -0 "$PID" 2>/dev/null; then
+            start_browser "$(wait_page_url)"  # The wait screen itself crashed
+        fi
+        sleep "$WAIT_RETRY_SECONDS" &
+        wait $!
+    done
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] MagicMirror answers: opening it."
+    stop_browser
+fi
+
+start_browser "$MIRROR_URL"
 
 # Wait for browser to be killed by the parent Python script
 wait $PID

@@ -82,3 +82,28 @@ def test_port_must_be_a_whole_number():
     clean, warnings = config_check.check({"mqtt": {"port": 1883.5}}, MODES)
     assert clean == {"mqtt": {}}
     assert len(warnings) == 1
+
+
+def test_daily_restart_is_normalized():
+    import yaml
+    # Unquoted 4:00 is read by YAML as 240 (base 60): same time
+    for value in ("04:00", "4:00", " 23:59 ", yaml.safe_load("t: 4:00")["t"]):
+        clean, warnings = config_check.check({"magic_mirror": {"daily_restart": value}}, MODES)
+        assert warnings == []
+        assert clean["magic_mirror"]["daily_restart"] in ("04:00", "23:59")
+    for value in ("", None, False):
+        clean, warnings = config_check.check({"magic_mirror": {"daily_restart": value}}, MODES)
+        assert warnings == []
+        assert clean["magic_mirror"]["daily_restart"] == ""
+
+
+def test_bad_mirror_values_are_removed():
+    config = {"magic_mirror": {"url": "http://mm:8080", "daily_restart": "25:00",
+                               "freeze_restart_minutes": -1}}
+    clean, warnings = config_check.check(config, MODES)
+    assert clean == {"magic_mirror": {"url": "http://mm:8080"}}
+    assert len(warnings) == 2
+    for value in ("noon", True, 1440, "4h"):
+        clean, warnings = config_check.check({"magic_mirror": {"daily_restart": value}}, MODES)
+        assert "daily_restart" not in clean["magic_mirror"]
+        assert len(warnings) == 1

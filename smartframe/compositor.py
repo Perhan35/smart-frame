@@ -123,20 +123,29 @@ def kill_own(names):
 
 
 def kill_group(proc, grace=2.0):
-    """SIGTERM the process group started for `proc`, then SIGKILL if it lingers
-    more than `grace` seconds."""
+    """SIGTERM the process group started for `proc`, then SIGKILL whatever is left
+    of the group after `grace` seconds (or as soon as `proc` exits).
+
+    The final SIGKILL also hits group members that outlive `proc`: a hung browser
+    page process ignores SIGTERM (or is stopped) and would keep its memory forever.
+    The group ID is read first: once `proc` is gone, it can no longer be looked up.
+    """
     try:
-        os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+        pgid = os.getpgid(proc.pid)
+    except (ProcessLookupError, PermissionError):
+        return  # Already gone
+    try:
+        os.killpg(pgid, signal.SIGTERM)
         proc.wait(timeout=grace)
         perf.mark("stop: exited after SIGTERM")  # PERF
     except (subprocess.TimeoutExpired, ProcessLookupError, PermissionError):
         perf.mark("stop: not gone after SIGTERM, sending SIGKILL")  # PERF
-        try:
-            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-        except ProcessLookupError:
-            pass  # Already gone
-        except Exception as e:
-            logging.debug(f"SIGKILL of process group {proc.pid} failed: {e}")
+    try:
+        os.killpg(pgid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass  # The whole group is gone
+    except Exception as e:
+        logging.debug(f"SIGKILL of process group {pgid} failed: {e}")
 
 
 def _get_labwc_config():

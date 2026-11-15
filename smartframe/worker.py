@@ -23,6 +23,11 @@ def run_command(cmd, payload):
             if supervisor.current_mode == payload and supervisor.current_process is None:
                 logging.info(f"Relaunching crashed mode '{payload}'.")
                 supervisor.start_mode(payload, restart=True)
+    elif cmd == "refresh":
+        # Frozen browser or daily restart (screen_watch): payload = (mode, reason)
+        mode, reason = payload
+        with supervisor.mode_lock:
+            supervisor.refresh_mode(mode, reason)
     elif cmd == "display_off":
         # Startup in "off". With keep_compositor_when_off, labwc is started now
         # (screen still off), as if a mode had run: the first switch then skips

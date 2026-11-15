@@ -204,3 +204,24 @@ def test_launch_mode_environment_and_level_pipe(monkeypatch):
     assert "MIRROR_URL" in proc.env
     assert "SMARTFRAME_LEVEL_FD" not in proc.env
     assert proc.pass_fds == ()
+
+
+def test_refresh_restarts_without_counting_a_crash(frame):
+    supervisor.start_mode("mirror")
+    first = supervisor.current_process
+    worker.run_command("refresh", ("mirror", "frozen page"))
+    assert supervisor.current_process is not first
+    assert frame.launched == [("mirror", "off"), ("mirror", "mirror")]  # Screen not switched again
+    assert supervisor._restart_attempts == 0
+    assert supervisor.current_mode == "mirror"
+    assert run_states(frame)[-1] == supervisor.RUN_STARTING
+
+
+def test_refresh_is_ignored_after_a_mode_change(frame):
+    supervisor.start_mode("audio")
+    worker.run_command("refresh", ("mirror", "daily restart"))
+    assert frame.launched == [("audio", "off")]
+    supervisor.current_process.code = 1  # Crashed: the watchdog handles it, not a refresh
+    supervisor.start_mode("off")
+    worker.run_command("refresh", ("off", "daily restart"))
+    assert supervisor.current_mode == "off"

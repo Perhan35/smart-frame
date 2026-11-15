@@ -1,6 +1,8 @@
 import os
+import signal
 import struct
 import subprocess
+import time
 import types
 
 import pytest
@@ -138,3 +140,25 @@ def test_failing_cached_method_is_dropped(screen, monkeypatch):
     monkeypatch.setattr(display, "FB_BLANK_PATH", "/nonexistent/blank")
     display.set_display_power(False)
     assert cache.working_methods["hardware"] == []
+
+
+@pytest.mark.skipif(not hasattr(os, "killpg"), reason="POSIX process groups")
+def test_kill_group_also_kills_members_that_ignore_sigterm():
+    # Like a hung browser page: the leader exits on SIGTERM, its child ignores it
+    proc = subprocess.Popen(
+        # An ignored signal stays ignored across exec ($BASHPID is missing in bash 3)
+        ["bash", "-c", "(trap '' TERM; exec sh -c 'echo $$; exec sleep 30') & wait"],
+        stdout=subprocess.PIPE, text=True, start_new_session=True,
+    )
+    child = int(proc.stdout.readline())
+    compositor.kill_group(proc, grace=2.0)
+    proc.stdout.close()
+    for _ in range(50):
+        try:
+            os.kill(child, 0)
+        except ProcessLookupError:
+            break
+        time.sleep(0.05)
+    else:
+        os.kill(child, signal.SIGKILL)
+        pytest.fail("a group member that ignores SIGTERM survived")
