@@ -40,6 +40,22 @@ if git diff-tree -r --name-only --no-commit-id ORIG_HEAD HEAD 2>/dev/null | grep
     rm -f "$TMP_UNIT"
 fi
 
+# 3b. Update the Wi-Fi watchdog, if it is installed and changed.
+WD_BIN=/usr/local/sbin/smartframe-wifi-watchdog
+WD_UNIT=/etc/systemd/system/smartframe-wifi-watchdog.service
+if [ -f "$WD_BIN" ] && { ! cmp -s "$REPO_ROOT/scripts/wifi_watchdog.sh" "$WD_BIN" \
+        || ! cmp -s "$REPO_ROOT/scripts/smartframe-wifi-watchdog.service" "$WD_UNIT"; }; then
+    echo "[post-merge] Wi-Fi watchdog changed — updating it..."
+    if sudo -n install -m 755 -o root -g root "$REPO_ROOT/scripts/wifi_watchdog.sh" "$WD_BIN" 2>/dev/null \
+        && sudo -n install -m 644 -o root -g root "$REPO_ROOT/scripts/smartframe-wifi-watchdog.service" "$WD_UNIT" 2>/dev/null \
+        && sudo -n systemctl daemon-reload 2>/dev/null \
+        && sudo -n systemctl restart smartframe-wifi-watchdog.service 2>/dev/null; then
+        echo "[post-merge] Wi-Fi watchdog updated."
+    else
+        echo "[post-merge] Warning: could not update the Wi-Fi watchdog. Run: ./scripts/setup_wifi_watchdog.sh"
+    fi
+fi
+
 # 4. Restart the service so the pulled code is actually running.
 #    (git runs this hook only when the pull brought changes. `sudo -n` never prompts:
 #    if a password is required, the hook prints the command instead of hanging.)

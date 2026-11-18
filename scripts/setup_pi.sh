@@ -109,6 +109,21 @@ if [ ! -f "$JOURNAL_CONF" ]; then
     fi
 fi
 
+# Wi-Fi watchdog: see scripts/wifi_watchdog.sh
+if [ -d /sys/class/net/wlan0/wireless ] && command -v nmcli >/dev/null 2>&1; then
+    echo ""
+    echo "== Wi-Fi watchdog (recommended on Wi-Fi) =="
+    echo "After a Wi-Fi drop, NetworkManager can give up reconnecting for good: the frame then"
+    echo "stays offline until it is unplugged. The watchdog reconnects it, resets the Wi-Fi chip,"
+    echo "and as a last resort reboots the Pi (after 30 min without Wi-Fi, at most once every 6 h)."
+    read -rp "Install the Wi-Fi watchdog? [Y/n] " wd_answer
+    if [[ "$wd_answer" =~ ^[Nn]$ ]]; then
+        echo "Skipped. You can install it later with: ./scripts/setup_wifi_watchdog.sh"
+    else
+        "$DIR/setup_wifi_watchdog.sh"
+    fi
+fi
+
 echo ""
 echo "== Audio Input Configuration =="
 echo "SmartFrame can automatically discover your I2S microphone during its first run."

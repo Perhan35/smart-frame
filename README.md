@@ -132,6 +132,21 @@ The setup script installs all OS-level dependencies (`portaudio`, SDL2, Chromium
 - **Memory tuning** (`[Y/n]`, recommended on a Pi Zero 2): see [Performance Optimization](#performance-optimization-pi-zero-2-wh).
 - **Disable cloud-init** (`[y/N]`, only offered when cloud-init has already done its first-boot work): saves about 5 s at each boot. Settings already saved on the Pi (Wi-Fi, user, hostname) keep working, but later edits to `user-data` / `network-config` on the boot partition are no longer applied. Undo: `sudo rm /etc/cloud/cloud-init.disabled`.
 - **Persistent journal** (`[y/N]`): Raspberry Pi OS keeps the system journal in RAM only. This keeps it on the SD card (50 MB max), so the logs of a freeze can still be read after a reboot (`journalctl -b -1`). Undo: `sudo rm /etc/systemd/journald.conf.d/90-smartframe-persistent.conf`.
+- **Wi-Fi watchdog** (`[Y/n]`, offered when the Pi has Wi-Fi): see [Wi-Fi watchdog](#wi-fi-watchdog).
+
+### Wi-Fi watchdog
+
+When the Wi-Fi drops and the first reconnection attempts fail (the access point does not answer, or the Pi's Wi-Fi chip is stuck), NetworkManager can end with the reason `no-secrets` and then stop trying for good. The frame keeps showing its mode, but Home Assistant sees it as unavailable until the Pi is reconnected by hand or unplugged. Check for it with `journalctl -b -1 | grep no-secrets`.
+
+`./scripts/setup_wifi_watchdog.sh` (offered by `setup_pi.sh`, safe to run again) installs a small service that checks the Wi-Fi every 30 s: a default route on `wlan0`, and the router answering ARP (`arping`, which works even when the router blocks ping). While the Wi-Fi is down it:
+
+1. asks NetworkManager to connect again after 90 s, then every 90 s (this also lifts the `no-secrets` block);
+2. reloads the Wi-Fi driver every 10 min (resets the chip, about 5 s);
+3. reboots the Pi after 30 min without Wi-Fi, at most once every 6 hours.
+
+It never looks at the MQTT broker or the MagicMirror server, so a server outage does not reboot the Pi. It does nothing when the Wi-Fi radio is turned off or when the Pi uses a cable. Settings (`0` = never reboot): `/etc/default/smartframe-wifi-watchdog`. Log: `journalctl -u smartframe-wifi-watchdog`. Remove: `./scripts/setup_wifi_watchdog.sh --remove`. A `git pull` updates the installed copy (post-merge hook).
+
+Frequent drops often come from a weak power supply: the Wi-Fi chip draws current peaks while it sends. Use a 5 V / 2.5 A supply, not a USB port of another device.
 
 ## Configuration
 

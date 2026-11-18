@@ -1,0 +1,16 @@
+[Unit]
+Description=SmartFrame Wi-Fi watchdog (reconnects, resets the Wi-Fi chip, reboots as a last resort)
+After=NetworkManager.service
+Wants=NetworkManager.service
+
+[Service]
+Type=simple
+# Installed by scripts/setup_wifi_watchdog.sh (a root-owned copy: the service runs as
+# root, so it must not run a file that the normal user can edit).
+ExecStart=/usr/local/sbin/smartframe-wifi-watchdog
+EnvironmentFile=-/etc/default/smartframe-wifi-watchdog
+Restart=always
+RestartSec=30
+
+[Install]
+WantedBy=multi-user.target
