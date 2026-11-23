@@ -71,6 +71,11 @@ _last_switch_at = time.monotonic()  # No preload right at boot: the first mode s
 
 _available_modes_cache = []
 
+# The mode is saved in the cache with the boot ID each time it changes. A service
+# restart comes back in the same mode; after a reboot of the Pi (new boot ID), the
+# frame starts in default_mode instead.
+BOOT_ID_PATH = "/proc/sys/kernel/random/boot_id"
+
 
 def get_available_modes(refresh=False):
     """Mode names from the modes directory, cached. refresh=True scans it again (a
@@ -79,6 +84,51 @@ def get_available_modes(refresh=False):
     if refresh or not _available_modes_cache:
         _available_modes_cache = config_check.available_modes(MODES_DIR)
     return _available_modes_cache
+
+
+def read_boot_id():
+    """ID of the current boot of the system, or None where it is not known (not Linux)."""
+    try:
+        with open(BOOT_ID_PATH) as f:
+            return f.read().strip() or None
+    except OSError:
+        return None
+
+
+def choose_startup_mode(saved_mode, saved_boot_id, boot_id, default_mode, modes):
+    """The mode to start with: the saved one if it was saved during this same boot
+    (service restart) and still exists, else default_mode (Pi reboot, no saved mode)."""
+    if boot_id and saved_boot_id == boot_id and saved_mode:
+        mode = str(saved_mode).lower()
+        if mode in modes:
+            return mode
+    return default_mode
+
+
+def startup_mode(default_mode):
+    """choose_startup_mode() with the saved mode and the current boot ID."""
+    mode = choose_startup_mode(
+        cache.working_methods.get("last_mode"),
+        cache.working_methods.get("last_mode_boot_id"),
+        read_boot_id(),
+        default_mode,
+        get_available_modes(),
+    )
+    if mode != default_mode:
+        logging.info(f"Service restarted: going back to the previous mode '{mode}'.")
+    return mode
+
+
+def _remember_mode():
+    """Save current_mode for the next service restart (written only when it changed).
+    Never called on the way out: a service stop keeps the mode it had."""
+    boot_id = read_boot_id()
+    saved = cache.working_methods
+    if saved.get("last_mode") == current_mode and saved.get("last_mode_boot_id") == boot_id:
+        return
+    saved["last_mode"] = current_mode
+    saved["last_mode_boot_id"] = boot_id
+    cache.save()
 
 
 def stop_current_mode():
@@ -133,6 +183,7 @@ def _go_off(new_run_state):
         compositor.stop_labwc()
     display.set_display_power(False)
     current_mode = "off"
+    _remember_mode()
     mqtt_link.publish(MQTT_STATE_TOPIC, current_mode, retain=True)
     _set_run_state(new_run_state)
 
@@ -216,6 +267,7 @@ def start_mode(mode, restart=False):
     # 1. Publish the choice IMMEDIATELY so the HA selector reacts at once. Whether the
     #    mode really runs is published separately (run state: starting -> running).
     current_mode = mode
+    _remember_mode()
     mqtt_link.publish(MQTT_STATE_TOPIC, current_mode, retain=True)
 
     if mode == "off":

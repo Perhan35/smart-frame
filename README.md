@@ -30,9 +30,11 @@ To connect the INMP441 I2S microphone to your Raspberry Pi, follow the wiring ta
 
 ![SmartFrame Audio Mode](images/smartframe_audio_mode.png)
 
+*Audio mode.*
+
 ![SmartFrame Mirror Mode](images/smartframe_mirror_mode.png)
 
-*Mirror mode, shown with made-up data (your MagicMirror shows your own modules).*
+*Mirror mode.*
 
 ## Linux Prerequisites (Raspberry Pi OS)
 

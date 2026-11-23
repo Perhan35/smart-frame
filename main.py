@@ -131,11 +131,12 @@ def main():
     except Exception as e:
         logging.error(f"Error initiating MQTT connection: {e}")
 
-    # 4. Request initial state from configuration via the worker queue
+    # 4. Request initial state via the worker queue: the mode from before after a
+    # service restart, default_mode after a reboot of the Pi.
     # This prevents the initial mode from racing with MQTT retained 'set_mode' messages.
     # The screen is only switched off when the first mode is "off": done through the
     # same queue, so it can never land after (and undo) a mode that turns it on.
-    default_mode = settings.config.get("default_mode", "off")
+    default_mode = supervisor.startup_mode(settings.config.get("default_mode", "off"))
     if str(default_mode).lower() == "off":
         worker.command_queue.put(("display_off", None))
     else:

@@ -2,7 +2,7 @@ import types
 
 import pytest
 
-from smartframe import compositor, display, mqtt_link, supervisor, worker
+from smartframe import cache, compositor, display, mqtt_link, supervisor, worker
 from smartframe.settings import MQTT_RUN_STATE_TOPIC, MQTT_STATE_TOPIC
 
 
@@ -40,6 +40,15 @@ def frame(monkeypatch):
         return FakeProcess()
     monkeypatch.setattr(supervisor, "_launch_mode", launch)
     monkeypatch.setattr(supervisor, "get_available_modes", lambda refresh=False: ["audio", "mirror", "off"])
+    # Saved mode: kept in memory, never written to the test cache file
+    rec.saves = 0
+    monkeypatch.setitem(cache.working_methods, "last_mode", None)
+    monkeypatch.setitem(cache.working_methods, "last_mode_boot_id", None)
+    monkeypatch.setattr(supervisor, "read_boot_id", lambda: "boot-1")
+
+    def save():
+        rec.saves += 1
+    monkeypatch.setattr(cache, "save", save)
     return rec
 
 
@@ -225,3 +234,55 @@ def test_refresh_is_ignored_after_a_mode_change(frame):
     supervisor.start_mode("off")
     worker.run_command("refresh", ("off", "daily restart"))
     assert supervisor.current_mode == "off"
+
+
+MODES = ["audio", "mirror", "off"]
+
+
+@pytest.mark.parametrize("saved, saved_boot, boot, expected", [
+    ("mirror", "boot-1", "boot-1", "mirror"),  # Service restart: same mode again
+    ("Audio", "boot-1", "boot-1", "audio"),
+    ("off", "boot-1", "boot-1", "off"),
+    ("mirror", "boot-1", "boot-2", "default"),  # Pi rebooted
+    ("mirror", None, "boot-1", "default"),  # Saved by an older version
+    (None, "boot-1", "boot-1", "default"),  # Nothing saved yet
+    ("mirror", None, None, "default"),  # Boot ID unknown (not Linux)
+    ("disco", "boot-1", "boot-1", "default"),  # Mode removed since
+])
+def test_choose_startup_mode(saved, saved_boot, boot, expected):
+    assert supervisor.choose_startup_mode(saved, saved_boot, boot, "default", MODES) == expected
+
+
+def test_mode_changes_are_saved_with_the_boot_id(frame):
+    supervisor.start_mode("mirror")
+    assert cache.working_methods["last_mode"] == "mirror"
+    assert cache.working_methods["last_mode_boot_id"] == "boot-1"
+    assert supervisor.startup_mode("off") == "mirror"
+    supervisor.start_mode("off")
+    assert cache.working_methods["last_mode"] == "off"
+    assert supervisor.startup_mode("audio") == "off"
+
+
+def test_saved_mode_is_written_only_when_it_changes(frame):
+    supervisor.start_mode("audio")
+    supervisor.start_mode("audio")  # Already running: nothing to save
+    assert frame.saves == 1
+
+
+def test_failed_mode_is_saved_as_off(frame):
+    supervisor.start_mode("audio")
+    supervisor._go_off(supervisor.RUN_FAILED)  # Last retry failed
+    assert cache.working_methods["last_mode"] == "off"
+
+
+def test_service_stop_keeps_the_saved_mode(frame, monkeypatch):
+    monkeypatch.setattr(supervisor, "stop_audio_preload", lambda: None)
+    supervisor.start_mode("mirror")
+    supervisor.stop_all()
+    assert cache.working_methods["last_mode"] == "mirror"
+
+
+def test_reboot_starts_in_default_mode(frame, monkeypatch):
+    supervisor.start_mode("mirror")
+    monkeypatch.setattr(supervisor, "read_boot_id", lambda: "boot-2")
+    assert supervisor.startup_mode("off") == "off"

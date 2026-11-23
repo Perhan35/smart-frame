@@ -12,17 +12,7 @@ Il faut une appli de mesure du son (en dBA) sur un téléphone, et un moment de 
 4. Optionnel : essayer `audio.mic_compensation: true`, puis refaire les étapes 2 et 3.
 5. Relancer le service : `sudo systemctl start smartframe`.
 
-## 2. Capture d'écran du mode audio
-
-Après la calibration, mettre de la musique près du cadre, puis, sur le Pi, en mode `audio` :
-
-```bash
-XDG_RUNTIME_DIR=/run/user/$(id -u) WAYLAND_DISPLAY=wayland-0 grim /tmp/smartframe_audio_mode.png
-```
-
-La copier dans `images/smartframe_audio_mode.png` (le README l'affiche déjà).
-
-## 3. Déplacer le tag `stable`
+## 2. Déplacer le tag `stable`
 
 Le tag `stable` du Pi pointe sur la dernière version testée. Après chaque mise à jour, une fois la nouvelle version testée sur le Pi (passages `off → audio → mirror → audio → off`, bouton Restart, redémarrage de Home Assistant, journal sans erreur), le déplacer dessus :
 
